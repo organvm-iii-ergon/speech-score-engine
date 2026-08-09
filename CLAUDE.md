@@ -34,7 +34,7 @@ The scaffold is structural, not feature-complete. The build runs (`pnpm install 
 │   └── scripts/README.md                       # Anchor for utility scripts
 ├── test/
 │   ├── fixtures/README.md                      # Anchor for shared test fixtures
-│   ├── integration/README.md                   # Anchor for parsing/versioning/rendering integration tests
+│   ├── integration/                            # Focused node:test regressions + future DB integration suites
 │   └── e2e/README.md                           # Anchor for browser-driven e2e tests
 ├── .github/workflows/ci.yml                    # install, typecheck, lint, build, migration-syntax check
 ├── dramaturgist-tuning-markdown-archive/       # The provenance-preserving canonical archive
@@ -73,9 +73,12 @@ Three durable conventions live in `docs/conventions/`. Read them before adding o
 | `pnpm build` | Turbo-orchestrated build for all apps + packages. |
 | `pnpm typecheck` | `tsc --noEmit` across the graph. |
 | `pnpm lint` / `pnpm format` | Biome check / Biome write. |
+| `pnpm test` | Focused integration regressions through Node's built-in test runner. |
 | `pnpm --filter <pkg> <script>` | Run a single workspace package's script. Used internally for `db:migrate` / `db:seed`. Example: `pnpm --filter @sse/database migrate`. |
 
-No test runner is wired up yet — no Vitest, Playwright, or other in `devDependencies`. The `test/{fixtures,integration,e2e}/` directories hold anchor READMEs only. Wave 2 of the §13 slice (scene CRUD + parser) introduces the runner; until then, "how do I run a test?" has no answer beyond `pnpm typecheck`.
+Focused integration regressions use Node's dependency-free `node:test` runner. Vitest and Playwright
+are not wired yet; Wave 2 of the §13 slice (scene CRUD + parser) can introduce broader application
+and browser coverage when that feature surface needs it.
 
 ## Architecture authority
 
@@ -150,7 +153,8 @@ The active plan-of-record for the §13 slice is `.claude/plans/2026-05-13-scene-
 
 ## What NOT to do here
 
-- **Do not commit unprompted.** Commits go in only when explicitly requested. The repo is on `main` with the remote at `git@github.com:4444J99/speech-score-engine.git` (private).
+- **Do not commit unprompted.** Commits go in only when explicitly requested. The default branch is
+  `main`; the current public remote is `git@github.com:organvm-iii-ergon/speech-score-engine.git`.
 - **Do not reformat, normalize, or "clean up" any file under `dramaturgist-tuning-markdown-archive/`** without explicit instruction. Provenance is the load-bearing property; SHA-1s in `SOURCES-INDEX.md` are tracked against those file contents.
 - **Do not modify a `docs/product/*.md` canvas in isolation.** The canonical original lives at `dramaturgist-tuning-markdown-archive/sources/`; `docs/product/` is a copy. If a canvas needs editing, source-first and re-copy. Better: write an ADR in `docs/adr/` rather than rewrite the spec.
 - **Do not bypass the blueprint's build order (§13).** The schema and contracts come first, then scene CRUD + parsing, then versioning, then render pipeline. Building the worker pipeline before there's a `scene_version` to render against will create coupling that has to be unwound.

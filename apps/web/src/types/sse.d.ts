@@ -12,6 +12,7 @@ export interface Lane {
   rate?: string;
   pan?: number;
   gain?: number;
+  align?: 'left' | 'right';
   tone?: { f: number; type: string };
   speech?: { pitch: number; rate: number; prefer: string[] };
 }
@@ -20,6 +21,10 @@ export interface ScoreEvent {
   row: number;
   lane: string;
   text: string;
+  // The visible score line can trigger a longer continuous spoken passage. `silent` visual lines
+  // remain part of the score and playhead, but do not add a second voice trigger.
+  speechText?: string;
+  silent?: boolean;
   section?: string;
   stage?: boolean;
   // Timing model — Ableton clip-view "for words". A clip has a beat position and a length; the
@@ -52,16 +57,34 @@ export interface Score {
 
 export type ClipMap = Record<string, string>;
 
+export interface WordTiming {
+  text: string;
+  offset: number;
+  duration: number;
+  start: number;
+  end: number;
+}
+
+export interface ClipTiming {
+  voice: string;
+  rate: string;
+  text: string;
+  duration: number;
+  words: WordTiming[];
+}
+
 export interface VoicePack {
   source?: string;
   format?: string;
   count?: number;
   clips: ClipMap;
+  timings?: Record<string, ClipTiming>;
 }
 
 export interface MountOptions {
   score: Score;
   clips: ClipMap | null;
+  timings?: Record<string, ClipTiming> | null;
   scores: Score[];
   onPick?: (id: string) => void;
 }

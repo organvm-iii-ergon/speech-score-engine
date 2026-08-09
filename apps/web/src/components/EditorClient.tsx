@@ -4,7 +4,7 @@ import { ClipWaveform } from '@/components/ClipWaveform';
 import { loadScript, loadStylesheet } from '@/lib/loadScript';
 import { ENGINE_SCRIPT, ENGINE_STYLES, SCORE_SCRIPTS } from '@/lib/scoreScripts';
 import { VOICE_CATALOG } from '@/lib/voiceCatalog';
-import type { Lane, Score } from '@/types/sse';
+import type { ClipTiming, Lane, Score } from '@/types/sse';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 // The arrangement editor — "Ableton for voice", clip-view "for words". A horizontal timeline: lanes
@@ -47,6 +47,8 @@ interface EditEvent {
   id: string;
   lane: string;
   text: string;
+  speechText?: string;
+  silent?: boolean;
   start: number; // beat position (fractional allowed)
   beats: number; // clip length in beats
   warp?: boolean; // stretch audio to fill `beats` (vs. natural recorded length)
@@ -109,12 +111,14 @@ export function EditorClient() {
   const [lanes, setLanes] = useState<Lane[]>(blankLanes);
   const [events, setEvents] = useState<EditEvent[]>([]);
   const [tempo, setTempo] = useState(3);
+  const [total, setTotal] = useState(12);
   const [title, setTitle] = useState('Untitled');
   const [scoreId, setScoreId] = useState('untitled');
   const [selected, setSelected] = useState<string | null>(null);
   const [registry, setRegistry] = useState<Record<string, Score>>({});
   const [performing, setPerforming] = useState(false);
   const [clips, setClips] = useState<Record<string, string> | null>(null); // neural pack for L6 craft
+  const [timings, setTimings] = useState<Record<string, ClipTiming> | null>(null);
   const [clipDur, setClipDur] = useState(0);
   const [pxPerBeat, setPxPerBeat] = useState(28); // timeline zoom
   const [snapIdx, setSnapIdx] = useState(0); // index into SNAPS
@@ -138,6 +142,8 @@ export function EditorClient() {
         id: `e${i}`,
         lane: e.lane,
         text: e.text,
+        ...(e.speechText ? { speechText: e.speechText } : {}),
+        ...(e.silent ? { silent: true } : {}),
         // migrate legacy integer scores: start defaults to row, length to 1 beat
         start: typeof e.start === 'number' ? e.start : e.row,
         beats: typeof e.beats === 'number' && e.beats > 0 ? e.beats : 1,
@@ -152,6 +158,7 @@ export function EditorClient() {
     );
     seq.current = sc.events.length;
     setTempo(sc.tempo ?? 3);
+    setTotal(sc.total);
     setTitle(sc.title);
     setScoreId(sc.id);
     setSelected(null);
@@ -163,14 +170,20 @@ export function EditorClient() {
     let cancelled = false;
     if (!registry[scoreId]) {
       setClips(null);
+      setTimings(null);
       return;
     }
     (async () => {
       await loadScript(`/prototypes/voices/${scoreId}.js`);
       if (cancelled) return;
-      setClips(window.SSE_VOICES?.[scoreId]?.clips ?? null);
+      const voicePack = window.SSE_VOICES?.[scoreId];
+      setClips(voicePack?.clips ?? null);
+      setTimings(voicePack?.timings ?? null);
     })().catch(() => {
-      if (!cancelled) setClips(null);
+      if (!cancelled) {
+        setClips(null);
+        setTimings(null);
+      }
     });
     return () => {
       cancelled = true;
@@ -335,7 +348,7 @@ export function EditorClient() {
       tempo,
       lanes,
       sections: {},
-      total: Math.ceil(maxEnd) + 3,
+      total: Math.max(total, Math.ceil(maxEnd) + 1),
       events: events
         .slice()
         .sort((a, b) => a.start - b.start)
@@ -345,6 +358,8 @@ export function EditorClient() {
             row,
             lane: e.lane,
             text: e.text,
+            ...(e.speechText ? { speechText: e.speechText } : {}),
+            ...(e.silent ? { silent: true } : {}),
             ...(Math.abs(e.start - row) > 1e-6 ? { start: tidy(e.start) } : {}),
             ...(Math.abs(e.beats - 1) > 1e-6 ? { beats: tidy(e.beats) } : {}),
             ...(e.warp ? { warp: true } : {}),
@@ -357,7 +372,7 @@ export function EditorClient() {
           };
         }),
     };
-  }, [events, lanes, tempo, title, scoreId]);
+  }, [events, lanes, tempo, title, scoreId, total]);
 
   const exportJson = () => {
     const score = toScore();
@@ -394,18 +409,20 @@ export function EditorClient() {
       const score = toScore();
       // Perform with the real neural clips when we have them, so audio craft is audible; else the
       // engine falls back to Web Speech (edited/new lines with no rendered clip do too).
-      handle = engine.mount(el, { score, clips, scores: [score] });
+      handle = engine.mount(el, { score, clips, timings, scores: [score] });
     })().catch((err) => console.error(err));
     return () => {
       cancelled = true;
       if (handle) handle.destroy();
     };
-  }, [performing, toScore, clips]);
+  }, [performing, toScore, clips, timings]);
 
   const selectedEv = events.find((e) => e.id === selected) ?? null;
   const selLane = selectedEv ? (lanes.find((l) => l.id === selectedEv.lane) ?? null) : null;
   const selIsAi = !!selLane && selLane.performer !== 'human';
-  const selB64 = selectedEv ? (clips?.[`${selectedEv.lane}|${selectedEv.text}`] ?? null) : null;
+  const selB64 = selectedEv
+    ? (clips?.[`${selectedEv.lane}|${selectedEv.speechText || selectedEv.text}`] ?? null)
+    : null;
   const durMax = clipDur > 0 ? clipDur : 4;
   const fadeMax = Math.min(1.5, durMax / 2);
   const maxEnd = events.reduce((m, e) => Math.max(m, e.start + e.beats), 0);

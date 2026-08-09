@@ -78,9 +78,10 @@ model that can't hold it — data model first, then surface, then persistence, t
 ## Cross-cutting
 
 Portable score-format spec (JSON) · **a library of scores** ✅ (`/library` — a browsable gallery;
-every card derives its facts from the score data. Four scores now: Philip Glass · 4 lanes, Richard &
-Anne · 2, Earnest · human+AI duet, **Macbeth's Three Witches · 3 lanes + chorus refrain**. Add a
-play in one place: `src/lib/scoreScripts.ts`.) · **share as one file** (`node
+every card derives its facts from the score data. Five scores now: Philip Glass · 4 lanes, Richard &
+Anne · 2, Earnest · human+AI duet, **Macbeth's Three Witches · 3 lanes + chorus refrain**, and
+**Lady Macbeth / Macbeth · 2 independently timed continuous passages**. Add a play in one place:
+`src/lib/scoreScripts.ts`.) · **share as one file** (`node
 tools/build-standalone.mjs` → `dist/speech-score.html`, everything inlined, opens offline by
 double-click) · share / export (screen-record, audio bounce) · accessibility.
 

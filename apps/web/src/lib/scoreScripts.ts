@@ -7,6 +7,7 @@ export const SCORE_SCRIPTS = [
   '/prototypes/scores/richard-and-anne.js',
   '/prototypes/scores/earnest-duet.js',
   '/prototypes/scores/macbeth-witches.js',
+  '/prototypes/scores/lady-macbeth-macbeth.js',
 ] as const;
 
 export const ENGINE_SCRIPT = '/prototypes/tracker-engine.js';

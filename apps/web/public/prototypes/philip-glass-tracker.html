@@ -3,13 +3,14 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>Philip Glass Buys a Loaf of Bread — Speech-Score</title>
+    <title>Speech-Score Tracker</title>
     <!--
       Self-contained speech-score tracker. No build, no network. Opens offline (file://).
       Thin shell over the SHARED engine core (tracker-engine.js + tracker.css) — the exact same
       engine the Next route (/tracker) loads. Renders any registered SCORE (window.SSE_SCORES):
-      Philip Glass (4 lanes), Richard & Anne (2), Earnest — a duet (human + AI). Voices are
-      pre-rendered neural clips (window.SSE_VOICES) played as polyphonic, zero-latency Web Audio.
+      Philip Glass (4 lanes), Richard & Anne (2), Earnest — a duet (human + AI), Macbeth's Three
+      Witches (3), and Lady Macbeth / Macbeth (2). Voices are pre-rendered neural clips
+      (window.SSE_VOICES) played as polyphonic, zero-latency Web Audio.
       Provenance: dramaturgist-tuning-markdown-archive/source-attachments/ (the 7 genesis screenshots).
     -->
     <link rel="stylesheet" href="tracker.css" />
@@ -36,10 +37,12 @@
     <script src="scores/richard-and-anne.js"></script>
     <script src="scores/earnest-duet.js"></script>
     <script src="scores/macbeth-witches.js"></script>
+    <script src="scores/lady-macbeth-macbeth.js"></script>
     <script src="voices/philip-glass.js"></script>
     <script src="voices/richard-and-anne.js"></script>
     <script src="voices/earnest-duet.js"></script>
     <script src="voices/macbeth-witches.js"></script>
+    <script src="voices/lady-macbeth-macbeth.js"></script>
     <!-- Shared engine core (identical file the Next route injects). -->
     <script src="tracker-engine.js"></script>
     <script>
@@ -52,6 +55,7 @@
         window.SSEEngine.mount(document.getElementById('root'), {
           score: SCORES[id],
           clips: voices.clips || null,
+          timings: voices.timings || null,
           scores: Object.values(SCORES),
         });
       })();

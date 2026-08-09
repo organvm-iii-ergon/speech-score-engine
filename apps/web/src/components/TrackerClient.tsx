@@ -35,10 +35,11 @@ export function TrackerClient() {
       if (!score) return;
       await loadScript(`/prototypes/voices/${id}.js`);
       if (cancelled) return;
-      const clips = window.SSE_VOICES?.[id]?.clips ?? null;
+      const voicePack = window.SSE_VOICES?.[id];
       handle = engine.mount(el, {
         score,
-        clips,
+        clips: voicePack?.clips ?? null,
+        timings: voicePack?.timings ?? null,
         scores: Object.values(scores),
         onPick: (nextId: string) => {
           const params = new URLSearchParams(window.location.search);
