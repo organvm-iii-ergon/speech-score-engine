@@ -9,7 +9,6 @@
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
@@ -63,14 +62,18 @@ function resolveProjectPath(candidate) {
 
 function comparablePath(file) {
   const resolved = path.resolve(file);
+  let existing = resolved;
+  const missingSegments = [];
+  while (!fs.existsSync(existing)) {
+    const parent = path.dirname(existing);
+    if (parent === existing) return resolved;
+    missingSegments.unshift(path.basename(existing));
+    existing = parent;
+  }
   try {
-    return fs.realpathSync(resolved);
+    return path.join(fs.realpathSync(existing), ...missingSegments);
   } catch {
-    try {
-      return path.join(fs.realpathSync(path.dirname(resolved)), path.basename(resolved));
-    } catch {
-      return resolved;
-    }
+    return resolved;
   }
 }
 
@@ -184,9 +187,12 @@ function main() {
     .sort((a, b) => eventStart(a.event) - eventStart(b.event));
   if (!events.length) fail('Score has no AI voice events to mix.');
 
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'speech-score-mix-'));
+  const temp = fs.mkdtempSync(path.join(path.dirname(out), '.speech-score-mix-'));
+  const muxTemp = videoOut
+    ? fs.mkdtempSync(path.join(path.dirname(videoOut), '.speech-score-mux-'))
+    : temp;
   const temporaryWav = path.join(temp, 'mix.wav');
-  const temporaryMp4 = path.join(temp, 'muxed.mp4');
+  const temporaryMp4 = path.join(muxTemp, 'muxed.mp4');
   try {
     const filters = [];
     const inputs = [];
@@ -295,6 +301,7 @@ function main() {
     }
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
+    if (muxTemp !== temp) fs.rmSync(muxTemp, { recursive: true, force: true });
   }
 }
 

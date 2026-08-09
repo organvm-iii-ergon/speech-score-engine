@@ -203,6 +203,16 @@ test('library, tracker, editor, and standalone source all register the score lan
   assert.match(standalone, /voices\/lady-macbeth-macbeth\.js/);
 });
 
+test('editing a continuous-passage trigger invalidates its stale generated speech key', () => {
+  const editor = fs.readFileSync(
+    path.join(ROOT, 'apps/web/src/components/EditorClient.tsx'),
+    'utf8',
+  );
+  assert.match(editor, /const renameClip = \(text: string\) =>/);
+  assert.match(editor, /speechText: undefined/);
+  assert.match(editor, /onChange=\{\(e\) => renameClip\(e\.target\.value\)\}/);
+});
+
 test('tracker gives timed continuous passages an audible Live cue with half-open section bounds', () => {
   const engine = fs.readFileSync(
     path.join(ROOT, 'apps/web/public/prototypes/tracker-engine.js'),
@@ -211,6 +221,81 @@ test('tracker gives timed continuous passages an audible Live cue with half-open
   assert.match(engine, /const playTimedCueRow = \(row\) =>/);
   assert.match(engine, /if \(timedCues && cue\)[\s\S]*?playTimedCueRow\(row\);[\s\S]*?return;/);
   assert.match(engine, /timedCues \? r < e : r <= e/);
+  assert.match(engine, /TIMINGS\[`\$\{lane\}\|\$\{sourceEvent\.speechText\}`\]/);
+  assert.doesNotMatch(engine, /Object\.entries\(TIMINGS\)\.find/);
+  assert.match(
+    engine,
+    /const planTimedPassage = \(sectionStart, sectionEnd, transportRate = 1\) =>/,
+  );
+  assert.match(engine, /const sectionTrimStart = Math\.max\(0, firstCue\.start - 0\.06\)/);
+  assert.match(
+    engine,
+    /\.\.\.sourceEvent,[\s\S]*?silent: false,[\s\S]*?sectionTrimStart,[\s\S]*?timingEnd,[\s\S]*?transportRate/,
+  );
+  assert.match(
+    engine,
+    /timedStartTs = performance\.now\(\) \+ 15;[\s\S]*?voice\(plan\.passageEvents\)/,
+  );
+});
+
+test('timed transport preserves section, tempo, monitor, and cancellation semantics', () => {
+  const engine = fs.readFileSync(
+    path.join(ROOT, 'apps/web/public/prototypes/tracker-engine.js'),
+    'utf8',
+  );
+  assert.match(
+    engine,
+    /cue\.ev\.el\.classList\.toggle\('spoken', inSection && seconds >= cue\.end\)/,
+  );
+  assert.match(
+    engine,
+    /const timedRange = \(\) => \(sel === 'full' \? \[0, TOTAL\] : SECTIONS\[sel\]\)/,
+  );
+  assert.match(engine, /const tempoScale = tempoBps \/ scoreTempoBps/);
+  assert.match(
+    engine,
+    /timedPassageDuration = \(sectionEnd - sectionStart\) \/ SUBDIV \/ tempoBps/,
+  );
+  assert.match(engine, /const activeSources = new Map\(\)/);
+  assert.match(engine, /activeSources\.set\(src, \{ lane: channel, gate: laneGate \}\)/);
+  assert.match(engine, /refreshLaneStates\(\);\s*refreshActiveSourceAudibility\(\)/);
+  assert.match(engine, /if \(cue\) cued = false/);
+  assert.match(engine, /const cancelPendingPlay = \(\) =>/);
+  assert.match(engine, /destroyed = true;\s*cancelPendingPlay\(\)/);
+  assert.match(engine, /\(ev\.trimStart \|\| 0\) \+ \(ev\.sectionTrimStart \|\| 0\)/);
+  assert.match(engine, /const sourceEnd = untrimmedEnd - Math\.max\(0, ev\.trimEnd \|\| 0\)/);
+
+  const silentBranch = engine.match(/if \(m === 'off'\) \{([\s\S]*?)\n\s*return;\n\s*\}/)?.[1];
+  assert.ok(silentBranch, 'Silent-mode branch must exist');
+  assert.match(silentBranch, /refreshMasterAudibility\(\)/);
+  assert.doesNotMatch(silentBranch, /pause\(\)|stopSamples\(\)|ctx\.suspend/);
+});
+
+test('render tools stage atomic outputs beside their destinations and provide font fallbacks', () => {
+  const mixer = fs.readFileSync(path.join(ROOT, 'tools/mix-score-audio.mjs'), 'utf8');
+  const reel = fs.readFileSync(path.join(ROOT, 'tools/render-story-reel.mjs'), 'utf8');
+  const frames = fs.readFileSync(path.join(ROOT, 'tools/render-story-frames.py'), 'utf8');
+  assert.match(mixer, /mkdtempSync\(path\.join\(path\.dirname\(out\),/);
+  assert.match(reel, /mkdtempSync\(path\.join\(path\.dirname\(out\),/);
+  assert.match(reel, /voicePack\.timings\[`\$\{lane\.id\}\|\$\{sourceEvent\.speechText\}`\]/);
+  assert.match(frames, /ImageFont\.load_default/);
+  assert.match(frames, /DejaVuSerif/);
+});
+
+test('voice generation preserves legacy playback and cannot publish failed renders', () => {
+  const renderer = fs.readFileSync(path.join(ROOT, 'tools/render-voices.mjs'), 'utf8');
+  assert.match(renderer, /const canImportEdgeTts = \(\) =>/);
+  assert.match(renderer, /execFileSync\(PYTHON, \['-c', 'import edge_tts'\]/);
+  assert.match(
+    renderer,
+    /if \(!canImportEdgeTts\(\)\)[\s\S]*?pip[\s\S]*?if \(!canImportEdgeTts\(\)\)[\s\S]*?throw new Error/,
+  );
+  assert.match(
+    renderer,
+    /typeof ev\.speechText === 'string'[\s\S]*?timings\[key\] = rendered\.timing/,
+  );
+  assert.match(renderer, /if \(failures > 0 \|\| clipCount === 0\)/);
+  assert.match(renderer, /fs\.writeFileSync\(pendingOut,[\s\S]*?fs\.renameSync\(pendingOut, out\)/);
 });
 
 for (const tool of ['mix-score-audio.mjs', 'render-story-reel.mjs']) {
@@ -260,3 +345,157 @@ for (const tool of ['mix-score-audio.mjs', 'render-story-reel.mjs']) {
     });
   }
 }
+
+test('mixer rejects every input/output and output/output collision before rendering', () => {
+  withCliSandbox('mix-score-audio.mjs', ({ sandboxRoot, toolFile, artFile }) => {
+    const cases = [
+      {
+        name: 'audio and timeline outputs',
+        args: ['--out', 'out/shared.wav', '--timeline-out', 'out/shared.wav'],
+      },
+      {
+        name: 'audio and video outputs',
+        args: ['--out', 'out/shared.mp4', '--video', artFile, '--video-out', 'out/shared.mp4'],
+      },
+      {
+        name: 'timeline and video outputs',
+        args: [
+          '--out',
+          'out/mix.wav',
+          '--timeline-out',
+          'out/shared.json',
+          '--video',
+          artFile,
+          '--video-out',
+          'out/shared.json',
+        ],
+      },
+      {
+        name: 'video input and audio output',
+        args: ['--out', artFile, '--video', artFile, '--video-out', 'out/video.mp4'],
+      },
+      {
+        name: 'video input and timeline output',
+        args: [
+          '--out',
+          'out/mix.wav',
+          '--timeline-out',
+          artFile,
+          '--video',
+          artFile,
+          '--video-out',
+          'out/video.mp4',
+        ],
+      },
+      {
+        name: 'video input and video output',
+        args: ['--out', 'out/mix.wav', '--video', artFile, '--video-out', artFile],
+      },
+    ];
+
+    const inputBefore = fs.readFileSync(artFile);
+    for (const collision of cases) {
+      const result = spawnSync(
+        process.execPath,
+        [toolFile, '--score', SCORE_ID, ...collision.args, '--force'],
+        {
+          cwd: sandboxRoot,
+          encoding: 'utf8',
+          env: { ...process.env, PATH: '' },
+        },
+      );
+      const output = `${result.stdout || ''}\n${result.stderr || ''}`;
+      assert.notEqual(result.status, 0, `${collision.name}\n${output}`);
+      assert.match(output, /must be different paths\./, collision.name);
+      assert.doesNotMatch(
+        output,
+        /ffmpeg|ffprobe/i,
+        `${collision.name} must fail before rendering`,
+      );
+    }
+    assert.deepEqual(
+      fs.readFileSync(artFile),
+      inputBefore,
+      'video input bytes must remain unchanged',
+    );
+  });
+});
+
+test('mixer resolves symlink aliases through missing output directories', (context) => {
+  withCliSandbox('mix-score-audio.mjs', ({ sandboxRoot, toolFile }) => {
+    const realRoot = path.join(sandboxRoot, 'real-output');
+    const aliasRoot = path.join(sandboxRoot, 'alias-output');
+    fs.mkdirSync(realRoot);
+    try {
+      fs.symlinkSync(realRoot, aliasRoot, 'dir');
+    } catch (error) {
+      if (error && ['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) {
+        context.skip(`directory symlinks unavailable: ${error.code}`);
+        return;
+      }
+      throw error;
+    }
+    const realOutput = path.join(realRoot, 'fresh', 'result.wav');
+    const aliasOutput = path.join(aliasRoot, 'fresh', 'result.wav');
+    const result = spawnSync(
+      process.execPath,
+      [
+        toolFile,
+        '--score',
+        SCORE_ID,
+        '--out',
+        realOutput,
+        '--timeline-out',
+        aliasOutput,
+        '--force',
+      ],
+      {
+        cwd: sandboxRoot,
+        encoding: 'utf8',
+        env: { ...process.env, PATH: '' },
+      },
+    );
+    const output = `${result.stdout || ''}\n${result.stderr || ''}`;
+    assert.notEqual(result.status, 0, output);
+    assert.match(output, /--out and --timeline-out must be different paths\./);
+    assert.equal(fs.existsSync(path.join(realRoot, 'fresh')), false, 'guard must run before mkdir');
+    assert.doesNotMatch(output, /ffmpeg|ffprobe/i, 'guard must run before rendering');
+  });
+});
+
+test('story renderer refuses artwork/audio output collisions before rendering', () => {
+  withCliSandbox('render-story-reel.mjs', ({ sandboxRoot, toolFile, artFile, audioFile }) => {
+    for (const target of [artFile, audioFile]) {
+      const before = fs.readFileSync(target);
+      const result = spawnSync(
+        process.execPath,
+        [
+          toolFile,
+          '--score',
+          SCORE_ID,
+          '--art',
+          artFile,
+          '--audio',
+          audioFile,
+          '--out',
+          target,
+          '--force',
+        ],
+        {
+          cwd: sandboxRoot,
+          encoding: 'utf8',
+          env: { ...process.env, PATH: '' },
+        },
+      );
+      const output = `${result.stdout || ''}\n${result.stderr || ''}`;
+      assert.notEqual(result.status, 0, output);
+      assert.match(output, /--out must be different from both input paths\./);
+      assert.deepEqual(fs.readFileSync(target), before, 'input bytes must remain unchanged');
+      assert.doesNotMatch(
+        output,
+        /ffmpeg|Missing tools\/\.venv/i,
+        'guard must fire before rendering',
+      );
+    }
+  });
+});

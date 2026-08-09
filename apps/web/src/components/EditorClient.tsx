@@ -47,7 +47,7 @@ interface EditEvent {
   id: string;
   lane: string;
   text: string;
-  speechText?: string;
+  speechText?: string | undefined;
   silent?: boolean;
   start: number; // beat position (fractional allowed)
   beats: number; // clip length in beats
@@ -300,6 +300,18 @@ export function EditorClient() {
   const patchClip = (patch: Partial<EditEvent>) => {
     if (!selected) return;
     setEvents((prev) => prev.map((e) => (e.id === selected ? { ...e, ...patch } : e)));
+  };
+  const renameClip = (text: string) => {
+    if (!selected) return;
+    setEvents((prev) =>
+      prev.map((event) => {
+        if (event.id !== selected) return event;
+        const renamed = { ...event, text, speechText: undefined };
+        // A continuous-passage trigger's speechText names the generated full-passage clip.
+        // Once its visible text is edited that clip is stale, so fall back to the edited text.
+        return renamed;
+      }),
+    );
   };
 
   const addLane = () => {
@@ -791,7 +803,7 @@ export function EditorClient() {
                 aria-label="Clip text"
                 style={{ ...field, flex: 1, minWidth: 180 }}
                 value={selectedEv.text}
-                onChange={(e) => patchClip({ text: e.target.value })}
+                onChange={(e) => renameClip(e.target.value)}
               />
               <select
                 aria-label="Clip lane"
