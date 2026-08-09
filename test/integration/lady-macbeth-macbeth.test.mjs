@@ -442,6 +442,24 @@ test('generated timings cover every visual line sequentially in its own lane', (
   });
 });
 
+test('generated passages preserve the rough-read pacing reference', () => {
+  assert.equal(score.total / score.tempo, 20, 'the reel must provide a twenty-second visual score');
+
+  const expectedDurations = {
+    LADY_MACBETH: 18,
+    MACBETH: 20,
+  };
+  for (const lane of score.lanes) {
+    assert.equal(lane.speech.targetSeconds, expectedDurations[lane.id]);
+    const trigger = score.events.find((event) => event.lane === lane.id && !event.silent);
+    const timing = voicePack.timings[`${lane.id}|${trigger.speechText}`];
+    assert.ok(
+      Math.abs(timing.duration - expectedDurations[lane.id]) <= 0.75,
+      `${lane.id} must stay close to the ${expectedDurations[lane.id]}-second rough-read reference`,
+    );
+  }
+});
+
 test('credits identify the poem, artwork/source, and remix without presenting play dialogue', () => {
   assert.equal(score.byline, 'poem @two.be · artwork @amaanjahangir');
   assert.match(score.caption, /visual-and-audio remix/i);
@@ -635,7 +653,7 @@ test('runtime timed Tones sounds every visual lane line exactly once', async () 
 
   const loop = [...tracker.animationFrames.values()][0];
   assert.ok(loop, 'timed performance must have a pending animation frame');
-  for (let timestamp = 0; timestamp < 6600; timestamp += 50) {
+  for (let timestamp = 0; timestamp < (score.total / score.tempo) * 1000; timestamp += 50) {
     tracker.setNow(timestamp);
     loop(timestamp);
   }
@@ -695,6 +713,9 @@ test('voice generation preserves legacy playback and cannot publish failed rende
     renderer,
     /typeof ev\.speechText === 'string'[\s\S]*?timings\[key\] = rendered\.timing/,
   );
+  assert.match(renderer, /`--rate=\$\{rate\}`/);
+  assert.match(renderer, /targetSeconds must be a positive number/);
+  assert.match(renderer, /atempo=\$\{\(1 \/ stretch\)\.toFixed\(6\)\}/);
   assert.match(renderer, /if \(failures > 0 \|\| clipCount === 0\)/);
   assert.match(renderer, /fs\.writeFileSync\(pendingOut,[\s\S]*?fs\.renameSync\(pendingOut, out\)/);
 });

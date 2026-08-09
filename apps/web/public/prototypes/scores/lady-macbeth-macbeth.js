@@ -2,6 +2,8 @@
 // Artwork and source post: @amaanjahangir. This is not dialogue from the play.
 // The source typesets nine left/right pairs; the performance treats each column as one continuous
 // character passage, so the two voices begin together rather than stopping between individual lines.
+// The rough performance reads set the pacing reference: about 18 seconds for Lady Macbeth and
+// 20 seconds for Macbeth. Keep the visual beat spacious enough to let that cadence register.
 (() => {
   const root = typeof window !== 'undefined' ? window : globalThis;
   root.SSE_SCORES = root.SSE_SCORES || {};
@@ -12,24 +14,24 @@
       name: 'Lady Macbeth',
       performer: 'ai',
       voice: 'en-GB-SoniaNeural',
-      rate: '+0%',
+      rate: '-50%',
       pan: -0.72,
       gain: 0.98,
       align: 'right',
       tone: { f: 466.16, type: 'triangle' },
-      speech: { pitch: 1.08, rate: 0.92, prefer: ['sonia', 'female'] },
+      speech: { pitch: 1.08, rate: 0.92, targetSeconds: 18, prefer: ['sonia', 'female'] },
     },
     {
       id: 'MACBETH',
       name: 'Macbeth',
       performer: 'ai',
       voice: 'en-GB-RyanNeural',
-      rate: '+40%',
+      rate: '-50%',
       pan: 0.72,
       gain: 1.0,
       align: 'left',
       tone: { f: 311.13, type: 'sine' },
-      speech: { pitch: 0.82, rate: 0.9, prefer: ['ryan', 'male'] },
+      speech: { pitch: 0.82, rate: 0.9, targetSeconds: 20, prefer: ['ryan', 'male'] },
     },
   ];
 
@@ -57,14 +59,14 @@
     title: 'Lady Macbeth / Macbeth',
     byline: 'poem @two.be · artwork @amaanjahangir',
     caption: 'A visual-and-audio remix: two concurrent character passages for UK neural voices.',
-    tempo: 1.5,
+    tempo: 0.5,
     lanes: LANES,
     sections: {
       tenderness: [0, 3],
       mirror: [3, 6],
       return: [6, 9],
     },
-    // Nine spoken pairs plus one tail beat, so the faster counterpoint clears before looping.
+    // Nine spoken pairs plus one tail beat: a twenty-second visual score for the two measured reads.
     total: 10,
     visualPairs: PAIRS,
     events: PAIRS.flatMap(([ladyMacbeth, macbeth], index) => {

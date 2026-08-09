@@ -99,28 +99,84 @@ if (requestedScoreId && !scores[requestedScoreId]) {
   throw new Error(`Unknown score: ${requestedScoreId}`);
 }
 
-const render = (voice, rate, text) => {
-  const h = crypto.createHash('sha1').update(`${voice}|${rate}|${text}`).digest('hex').slice(0, 12);
+const render = (voice, rate, text, targetSeconds) => {
+  if (targetSeconds !== undefined && (!Number.isFinite(targetSeconds) || targetSeconds <= 0)) {
+    throw new Error(`targetSeconds must be a positive number, received ${targetSeconds}`);
+  }
+  const h = crypto
+    .createHash('sha1')
+    .update(`${voice}|${rate}|${targetSeconds ?? ''}|${text}`)
+    .digest('hex')
+    .slice(0, 12);
   const mp3 = path.join(CACHE, `${h}.mp3`);
   const timing = path.join(CACHE, `${h}.timing.json`);
+  const rawMp3 = path.join(CACHE, `${h}.raw.mp3`);
+  const rawTiming = path.join(CACHE, `${h}.raw.timing.json`);
   if (!fs.existsSync(mp3) || !fs.existsSync(timing)) {
-    execFileSync(
-      PYTHON,
-      [
-        EDGE_RENDERER,
-        '--voice',
-        voice,
-        '--rate',
-        rate,
-        '--text',
-        text,
-        '--media-out',
-        mp3,
-        '--timing-out',
-        timing,
-      ],
-      { stdio: ['ignore', 'ignore', 'pipe'] },
-    );
+    if (!fs.existsSync(rawMp3) || !fs.existsSync(rawTiming)) {
+      execFileSync(
+        PYTHON,
+        [
+          EDGE_RENDERER,
+          '--voice',
+          voice,
+          `--rate=${rate}`,
+          '--text',
+          text,
+          '--media-out',
+          rawMp3,
+          '--timing-out',
+          rawTiming,
+        ],
+        { stdio: ['ignore', 'ignore', 'pipe'] },
+      );
+    }
+    const sourceTiming = JSON.parse(fs.readFileSync(rawTiming, 'utf8'));
+    const stretch = targetSeconds === undefined ? 1 : targetSeconds / sourceTiming.duration;
+    const pendingMp3 = `${mp3}.${process.pid}.tmp.mp3`;
+    const pendingTiming = `${timing}.${process.pid}.tmp`;
+    try {
+      if (stretch === 1) {
+        fs.copyFileSync(rawMp3, pendingMp3);
+      } else {
+        execFileSync(
+          'ffmpeg',
+          [
+            '-hide_banner',
+            '-loglevel',
+            'error',
+            '-y',
+            '-i',
+            rawMp3,
+            '-filter:a',
+            `atempo=${(1 / stretch).toFixed(6)}`,
+            '-c:a',
+            'libmp3lame',
+            '-q:a',
+            '2',
+            pendingMp3,
+          ],
+          { stdio: 'inherit' },
+        );
+      }
+      const scaledTiming = {
+        ...sourceTiming,
+        ...(targetSeconds === undefined ? {} : { duration: targetSeconds }),
+        words: sourceTiming.words.map((word) => ({
+          ...word,
+          offset: Math.round(word.offset * stretch),
+          duration: Math.round(word.duration * stretch),
+          start: word.start * stretch,
+          end: word.end * stretch,
+        })),
+      };
+      fs.writeFileSync(pendingTiming, JSON.stringify(scaledTiming));
+      fs.renameSync(pendingMp3, mp3);
+      fs.renameSync(pendingTiming, timing);
+    } finally {
+      fs.rmSync(pendingMp3, { force: true });
+      fs.rmSync(pendingTiming, { force: true });
+    }
   }
   return {
     clip: fs.readFileSync(mp3).toString('base64'),
@@ -151,7 +207,7 @@ for (const score of targetScores) {
       continue;
     }
     try {
-      const rendered = render(lane.voice, lane.rate || '+0%', speechText);
+      const rendered = render(lane.voice, lane.rate || '+0%', speechText, lane.speech?.targetSeconds);
       clips[key] = rendered.clip;
       // `speechText` marks a continuous passage whose visual rows are derived from one source clip.
       // Only those clips opt into deterministic playback and preserved source pre-roll. Legacy
