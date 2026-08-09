@@ -442,20 +442,26 @@ test('generated timings cover every visual line sequentially in its own lane', (
   });
 });
 
-test('generated passages preserve the rough-read pacing reference', () => {
+test('generated passages use natural word speed and phrase-led pauses', () => {
   assert.equal(score.total / score.tempo, 20, 'the reel must provide a twenty-second visual score');
 
-  const expectedDurations = {
-    LADY_MACBETH: 18,
-    MACBETH: 20,
+  const expectedDurationRanges = {
+    LADY_MACBETH: [11, 14],
+    MACBETH: [18, 20],
   };
   for (const lane of score.lanes) {
-    assert.equal(lane.speech.targetSeconds, expectedDurations[lane.id]);
+    assert.equal(lane.rate, '-15%', `${lane.id} should use only a modest rate adjustment`);
+    assert.equal(
+      lane.speech.targetSeconds,
+      undefined,
+      `${lane.id} must not stretch rendered speech`,
+    );
     const trigger = score.events.find((event) => event.lane === lane.id && !event.silent);
     const timing = voicePack.timings[`${lane.id}|${trigger.speechText}`];
+    const [minimum, maximum] = expectedDurationRanges[lane.id];
     assert.ok(
-      Math.abs(timing.duration - expectedDurations[lane.id]) <= 0.75,
-      `${lane.id} must stay close to the ${expectedDurations[lane.id]}-second rough-read reference`,
+      timing.duration >= minimum && timing.duration <= maximum,
+      `${lane.id} must use phrase pauses without elongating every word`,
     );
   }
 });
@@ -714,8 +720,7 @@ test('voice generation preserves legacy playback and cannot publish failed rende
     /typeof ev\.speechText === 'string'[\s\S]*?timings\[key\] = rendered\.timing/,
   );
   assert.match(renderer, /`--rate=\$\{rate\}`/);
-  assert.match(renderer, /targetSeconds must be a positive number/);
-  assert.match(renderer, /atempo=\$\{\(1 \/ stretch\)\.toFixed\(6\)\}/);
+  assert.doesNotMatch(renderer, /targetSeconds|atempo=/);
   assert.match(renderer, /if \(failures > 0 \|\| clipCount === 0\)/);
   assert.match(renderer, /fs\.writeFileSync\(pendingOut,[\s\S]*?fs\.renameSync\(pendingOut, out\)/);
 });

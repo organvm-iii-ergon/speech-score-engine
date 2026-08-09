@@ -2,8 +2,9 @@
 // Artwork and source post: @amaanjahangir. This is not dialogue from the play.
 // The source typesets nine left/right pairs; the performance treats each column as one continuous
 // character passage, so the two voices begin together rather than stopping between individual lines.
-// The rough performance reads set the pacing reference: about 18 seconds for Lady Macbeth and
-// 20 seconds for Macbeth. Keep the visual beat spacious enough to let that cadence register.
+// The rough performance reads set the pacing reference: take space between thoughts, without
+// stretching the voice itself. Each printed pair becomes a spoken phrase, so the delivery keeps
+// natural word speed while the silences carry the contemplative rhythm.
 (() => {
   const root = typeof window !== 'undefined' ? window : globalThis;
   root.SSE_SCORES = root.SSE_SCORES || {};
@@ -14,24 +15,24 @@
       name: 'Lady Macbeth',
       performer: 'ai',
       voice: 'en-GB-SoniaNeural',
-      rate: '-50%',
+      rate: '-15%',
       pan: -0.72,
       gain: 0.98,
       align: 'right',
       tone: { f: 466.16, type: 'triangle' },
-      speech: { pitch: 1.08, rate: 0.92, targetSeconds: 18, prefer: ['sonia', 'female'] },
+      speech: { pitch: 1.08, rate: 0.92, prefer: ['sonia', 'female'] },
     },
     {
       id: 'MACBETH',
       name: 'Macbeth',
       performer: 'ai',
       voice: 'en-GB-RyanNeural',
-      rate: '-50%',
+      rate: '-15%',
       pan: 0.72,
       gain: 1.0,
       align: 'left',
       tone: { f: 311.13, type: 'sine' },
-      speech: { pitch: 0.82, rate: 0.9, targetSeconds: 20, prefer: ['ryan', 'male'] },
+      speech: { pitch: 0.82, rate: 0.9, prefer: ['ryan', 'male'] },
     },
   ];
 
@@ -47,10 +48,11 @@
     ['to be', 'from my birth.'],
     ['so soft', 'it hurts.'],
   ];
+  const spokenPhrases = (column) =>
+    `${PAIRS.map((pair) => pair[column].replace(/[.!?]+$/, '')).join('. ')}.`;
   const passages = {
-    LADY_MACBETH: `${PAIRS.map(([line]) => line).join(' ')}.`,
-    MACBETH:
-      'you have transformed me, and i am the monster in the mirror, i have come full circle, this, this is me, as i was destined from my birth, it hurts.',
+    LADY_MACBETH: spokenPhrases(0),
+    MACBETH: spokenPhrases(1),
   };
 
   root.SSE_SCORES['lady-macbeth-macbeth'] = {
@@ -66,7 +68,8 @@
       mirror: [3, 6],
       return: [6, 9],
     },
-    // Nine spoken pairs plus one tail beat: a twenty-second visual score for the two measured reads.
+    // Nine spoken pairs plus one tail beat: a twenty-second visual score that gives Macbeth room
+    // to complete the natural, phrase-led delivery.
     total: 10,
     visualPairs: PAIRS,
     events: PAIRS.flatMap(([ladyMacbeth, macbeth], index) => {
