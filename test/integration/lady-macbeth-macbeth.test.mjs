@@ -103,6 +103,241 @@ function writeLegacyNoTimingFixture(sandboxRoot) {
   return scoreId;
 }
 
+function fakeClassList() {
+  const tokens = new Set();
+  return {
+    add: (...names) => {
+      for (const name of names) tokens.add(name);
+    },
+    remove: (...names) => {
+      for (const name of names) tokens.delete(name);
+    },
+    toggle: (name, force) => {
+      if (force === undefined) {
+        if (tokens.has(name)) {
+          tokens.delete(name);
+          return false;
+        }
+        tokens.add(name);
+        return true;
+      }
+      if (force) tokens.add(name);
+      else tokens.delete(name);
+      return force;
+    },
+    contains: (name) => tokens.has(name),
+  };
+}
+
+function fakeElement(tagName = 'div') {
+  const listeners = new Map();
+  return {
+    tagName,
+    children: [],
+    classList: fakeClassList(),
+    dataset: {},
+    style: { setProperty: () => {} },
+    offsetHeight: 26,
+    offsetWidth: 1,
+    clientHeight: 260,
+    scrollHeight: 1000,
+    textContent: '',
+    className: '',
+    appendChild(child) {
+      this.children.push(child);
+      return child;
+    },
+    addEventListener(type, listener) {
+      listeners.set(type, listener);
+    },
+    removeEventListener(type) {
+      listeners.delete(type);
+    },
+    emit(type, event = { target: this }) {
+      return listeners.get(type)?.(event);
+    },
+    closest(selector) {
+      return selector === 'button' && this.tagName === 'button' ? this : null;
+    },
+    connect() {
+      return this;
+    },
+    disconnect() {},
+  };
+}
+
+function mountTimedTracker({ deferDecode = false } = {}) {
+  let now = 0;
+  let nextAnimationFrame = 1;
+  const animationFrames = new Map();
+  const starts = [];
+  const pendingDecodes = [];
+  const decodedBuffer = {
+    duration: 10,
+    getChannelData: () => new Float32Array(1),
+  };
+
+  class FakeAudioContext {
+    constructor() {
+      this.destination = fakeElement('destination');
+      this.state = 'running';
+    }
+
+    get currentTime() {
+      return now / 1000;
+    }
+
+    createGain() {
+      const gain = fakeElement('gain');
+      gain.gain = {
+        value: 1,
+        cancelScheduledValues: () => {},
+        setValueAtTime: (value) => {
+          gain.gain.value = value;
+        },
+        linearRampToValueAtTime: (value) => {
+          gain.gain.value = value;
+        },
+        exponentialRampToValueAtTime: (value) => {
+          gain.gain.value = value;
+        },
+      };
+      return gain;
+    }
+
+    createStereoPanner() {
+      const panner = fakeElement('panner');
+      panner.pan = { value: 0 };
+      return panner;
+    }
+
+    createBufferSource() {
+      const source = fakeElement('source');
+      source.detune = { value: 0 };
+      source.playbackRate = { value: 1 };
+      source.start = (when, offset, duration) => {
+        starts.push({ when, offset, duration, playbackRate: source.playbackRate.value });
+      };
+      source.stop = () => source.onended?.();
+      return source;
+    }
+
+    createOscillator() {
+      const oscillator = fakeElement('oscillator');
+      oscillator.frequency = { setValueAtTime: () => {} };
+      oscillator.start = () => {};
+      oscillator.stop = () => oscillator.onended?.();
+      return oscillator;
+    }
+
+    decodeAudioData() {
+      if (!deferDecode) return Promise.resolve(decodedBuffer);
+      return new Promise((resolve) => pendingDecodes.push(() => resolve(decodedBuffer)));
+    }
+
+    resume() {
+      return Promise.resolve();
+    }
+
+    close() {
+      this.state = 'closed';
+      return Promise.resolve();
+    }
+  }
+
+  const root = fakeElement('root');
+  const ui = new Map();
+  const createUi = (selector, tagName = 'div') => {
+    const element = fakeElement(tagName);
+    ui.set(selector, element);
+    return element;
+  };
+  root.querySelector = (selector) => ui.get(selector) || null;
+  createUi('.t-title');
+  createUi('.t-byline');
+  createUi('.t-caption');
+  createUi('.t-track').scrollHeight = 1000;
+  createUi('.t-viewport').clientHeight = 260;
+  createUi('.t-heads');
+  createUi('.t-scores');
+  createUi('.t-sections');
+  createUi('.t-play', 'button');
+  createUi('.t-restart', 'button');
+  const sound = createUi('.t-sound');
+  const voiceButton = fakeElement('button');
+  voiceButton.dataset.m = 'voice';
+  const toneButton = fakeElement('button');
+  toneButton.dataset.m = 'tone';
+  const silentButton = fakeElement('button');
+  silentButton.dataset.m = 'off';
+  sound.children.push(voiceButton, toneButton, silentButton);
+  createUi('.t-mode');
+  createUi('.t-countin', 'button');
+  createUi('.t-tempo').value = String(score.tempo);
+  createUi('.t-count');
+  createUi('.t-hint');
+
+  const runtimeScore = JSON.parse(JSON.stringify(score));
+  const runtimeTimings = JSON.parse(JSON.stringify(voicePack.timings));
+  const clips = Object.fromEntries(Object.keys(runtimeTimings).map((key) => [key, 'AA==']));
+  const window = {
+    AudioContext: FakeAudioContext,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    setTimeout,
+  };
+  const sandbox = {
+    window,
+    document: { createElement: fakeElement },
+    navigator: {},
+    performance: { now: () => now },
+    requestAnimationFrame: (callback) => {
+      const id = nextAnimationFrame;
+      nextAnimationFrame += 1;
+      animationFrames.set(id, callback);
+      return id;
+    },
+    cancelAnimationFrame: (id) => animationFrames.delete(id),
+    atob: (value) => Buffer.from(value, 'base64').toString('binary'),
+    clearTimeout,
+  };
+  vm.createContext(sandbox);
+  new vm.Script(
+    fs.readFileSync(path.join(ROOT, 'apps/web/public/prototypes/tracker-engine.js'), 'utf8'),
+  ).runInContext(sandbox);
+  const mounted = window.SSEEngine.mount(root, {
+    score: runtimeScore,
+    clips,
+    timings: runtimeTimings,
+    scores: [runtimeScore],
+  });
+
+  return {
+    animationFrames,
+    mounted,
+    pendingDecodes,
+    setNow: (value) => {
+      now = value;
+    },
+    sound,
+    starts,
+    toneButton,
+    ui,
+    voiceButton,
+  };
+}
+
+async function flushTrackerWork() {
+  await Promise.resolve();
+  await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+}
+
+async function emitTrackerClick(element, target = element) {
+  element.emit('click', { target });
+  await flushTrackerWork();
+}
+
 const score = evaluateRegistration(SCORE_FILE, 'SSE_SCORES');
 const voicePack = evaluateRegistration(VOICE_FILE, 'SSE_VOICES');
 
@@ -324,6 +559,58 @@ test('Tones to Voices resumes the active timed passage at its live source offset
     engine,
     /previousSoundMode === 'tone' \|\| activeSources\.size === 0[\s\S]*?void resumeTimedVoices\(\)/,
   );
+});
+
+test('runtime timed transport resumes Voices in phase and lets the mirror excerpt finish', async () => {
+  const tracker = mountTimedTracker();
+  const mirrorButton = tracker.ui
+    .get('.t-sections')
+    .children.find((button) => button.dataset.s === 'mirror');
+  assert.ok(mirrorButton, 'the Mirror section button must be mounted');
+  await emitTrackerClick(tracker.ui.get('.t-sections'), mirrorButton);
+  await emitTrackerClick(tracker.ui.get('.t-play'));
+  assert.equal(tracker.starts.length, 2, 'both timed lanes must start together');
+  const initialOffsets = tracker.starts.map((start) => start.offset);
+
+  tracker.setNow(1015);
+  await emitTrackerClick(tracker.sound, tracker.toneButton);
+  assert.equal(tracker.starts.length, 2, 'Tones must stop rather than restart voice sources');
+  await emitTrackerClick(tracker.sound, tracker.voiceButton);
+  assert.equal(tracker.starts.length, 4, 'Voices must recreate both timed sources');
+  tracker.starts.slice(2).forEach((start, index) => {
+    assert.ok(
+      Math.abs(start.offset - (initialOffsets[index] + 1)) < 1e-6,
+      `lane ${index} must resume one second into its live source, got ${start.offset}`,
+    );
+  });
+
+  tracker.setNow(2200);
+  const loop = [...tracker.animationFrames.values()][0];
+  assert.ok(loop, 'timed performance must have a pending animation frame');
+  loop(2200);
+  assert.equal(
+    tracker.starts.length,
+    4,
+    'the two-second mirror grid must not cut its longer planned excerpt off mid-line',
+  );
+  tracker.mounted.destroy();
+});
+
+test('runtime deferred voice decode cannot resume after the user leaves Voices', async () => {
+  const tracker = mountTimedTracker({ deferDecode: true });
+  await emitTrackerClick(tracker.sound, tracker.toneButton);
+  await emitTrackerClick(tracker.ui.get('.t-play'));
+  await emitTrackerClick(tracker.sound, tracker.voiceButton);
+  assert.equal(tracker.pendingDecodes.length, 2, 'Voices must wait for both clip decodes');
+  await emitTrackerClick(tracker.sound, tracker.toneButton);
+  for (const resolve of tracker.pendingDecodes) resolve();
+  await flushTrackerWork();
+  assert.equal(
+    tracker.starts.length,
+    0,
+    'a finished decode must not restore Voices after the user selected Tones',
+  );
+  tracker.mounted.destroy();
 });
 
 test('render tools stage atomic outputs beside their destinations and provide font fallbacks', () => {
