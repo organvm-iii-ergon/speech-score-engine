@@ -13,6 +13,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 
+import { deriveRowCompleteSchedule } from './row-complete-schedule.mjs';
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SCORES_DIR = path.join(ROOT, 'apps/web/public/prototypes/scores');
 const VOICES_DIR = path.join(ROOT, 'apps/web/public/prototypes/voices');
@@ -147,7 +149,11 @@ function main() {
   if (!score) fail(`Score ${JSON.stringify(options.score)} did not register itself.`);
   if (!voicePack?.clips) fail(`Voice pack ${JSON.stringify(options.score)} did not register clips.`);
 
-  const duration = options.duration === undefined ? scoreSeconds(score) : Number(options.duration);
+  const rowCompleteSchedule = deriveRowCompleteSchedule(score, voicePack);
+  const duration =
+    options.duration === undefined
+      ? (rowCompleteSchedule?.duration ?? scoreSeconds(score))
+      : Number(options.duration);
   if (!Number.isFinite(duration) || duration <= 0) fail('--duration must be a positive number of seconds.');
   const out = resolveProjectPath(options.out);
   const timelineOut = options.timelineOut ? resolveProjectPath(options.timelineOut) : null;
@@ -178,14 +184,34 @@ function main() {
       }
     }
   }
-  for (const [, output] of outputs) assertWritableOutput(output, options.force);
 
   const lanes = new Map(score.lanes.map((lane) => [lane.id, lane]));
-  const events = score.events
-    .map((event) => ({ event, lane: lanes.get(event.lane) }))
-    .filter(({ event, lane }) => !event.silent && lane?.performer !== 'human')
-    .sort((a, b) => eventStart(a.event) - eventStart(b.event));
+  const events = rowCompleteSchedule
+    ? rowCompleteSchedule.rows.flatMap(({ clips }) =>
+        clips.map(({ event, lane, start }) => ({ event, lane, startSeconds: start })),
+      )
+    : score.events
+        .map((event) => ({ event, lane: lanes.get(event.lane), startSeconds: eventStart(event) / score.tempo }))
+        .filter(({ event, lane }) => !event.silent && lane?.performer !== 'human');
+  events.sort((left, right) => left.startSeconds - right.startSeconds);
   if (!events.length) fail('Score has no AI voice events to mix.');
+  if (timelineOut) {
+    const missingTiming = events.find(({ event }) => {
+      const speechText = event.speechText || event.text;
+      const words = voicePack.timings?.[`${event.lane}|${speechText}`]?.words;
+      return !Array.isArray(words) || words.length === 0;
+    });
+    if (missingTiming) {
+      const speechText = missingTiming.event.speechText || missingTiming.event.text;
+      fail(
+        `Cannot write --timeline-out: mixed voice event ${JSON.stringify(
+          `${missingTiming.event.lane}|${speechText}`,
+        )} lacks a non-empty Edge-TTS word-timing record.`,
+      );
+    }
+  }
+  // Validate exact-timeline eligibility before creating output directories or invoking FFmpeg.
+  for (const [, output] of outputs) assertWritableOutput(output, options.force);
 
   const temp = fs.mkdtempSync(path.join(path.dirname(out), '.speech-score-mix-'));
   const muxTemp = videoOut
@@ -202,7 +228,7 @@ function main() {
       source: 'Edge-TTS word boundaries from the same stream as each mixed clip',
       events: [],
     };
-    for (const [index, { event, lane }] of events.entries()) {
+    for (const [index, { event, lane, startSeconds }] of events.entries()) {
       const speechText = event.speechText || event.text;
       const key = `${event.lane}|${speechText}`;
       const clip = voicePack.clips[key];
@@ -213,7 +239,6 @@ function main() {
       fs.writeFileSync(clipFile, Buffer.from(clip, 'base64'));
       inputs.push('-i', clipFile);
 
-      const startSeconds = eventStart(event) / score.tempo;
       const clipTiming = voicePack.timings?.[key];
       timeline.events.push({
         lane: event.lane,
