@@ -68,6 +68,41 @@ function withCliSandbox(tool, callback) {
   }
 }
 
+function writeLegacyNoTimingFixture(sandboxRoot) {
+  const scoreId = 'legacy-no-timing';
+  const scorePath = path.join(sandboxRoot, 'apps/web/public/prototypes/scores', `${scoreId}.js`);
+  const voicePath = path.join(sandboxRoot, 'apps/web/public/prototypes/voices', `${scoreId}.js`);
+  fs.mkdirSync(path.dirname(scorePath), { recursive: true });
+  fs.mkdirSync(path.dirname(voicePath), { recursive: true });
+  fs.writeFileSync(
+    scorePath,
+    `(() => {
+  const root = typeof window !== 'undefined' ? window : globalThis;
+  root.SSE_SCORES = root.SSE_SCORES || {};
+  root.SSE_SCORES[${JSON.stringify(scoreId)}] = {
+    id: ${JSON.stringify(scoreId)},
+    tempo: 1,
+    total: 1,
+    lanes: [{ id: 'LEGACY', performer: 'ai' }],
+    events: [{ row: 0, lane: 'LEGACY', text: 'no timing' }],
+  };
+})();
+`,
+  );
+  fs.writeFileSync(
+    voicePath,
+    `(() => {
+  const root = typeof window !== 'undefined' ? window : globalThis;
+  root.SSE_VOICES = root.SSE_VOICES || {};
+  root.SSE_VOICES[${JSON.stringify(scoreId)}] = {
+    clips: { 'LEGACY|no timing': 'ZHVtbXk=' },
+  };
+})();
+`,
+  );
+  return scoreId;
+}
+
 const score = evaluateRegistration(SCORE_FILE, 'SSE_SCORES');
 const voicePack = evaluateRegistration(VOICE_FILE, 'SSE_VOICES');
 
@@ -252,10 +287,9 @@ test('timed transport preserves section, tempo, monitor, and cancellation semant
     /const timedRange = \(\) => \(sel === 'full' \? \[0, TOTAL\] : SECTIONS\[sel\]\)/,
   );
   assert.match(engine, /const tempoScale = tempoBps \/ scoreTempoBps/);
-  assert.match(
-    engine,
-    /timedPassageDuration = \(sectionEnd - sectionStart\) \/ SUBDIV \/ tempoBps/,
-  );
+  assert.match(engine, /const gridDuration = \(sectionEnd - sectionStart\) \/ SUBDIV \/ tempoBps/);
+  assert.match(engine, /const excerptDuration = plan\.passageDuration \/ tempoScale/);
+  assert.match(engine, /timedPassageDuration = Math\.max\(gridDuration, excerptDuration\)/);
   assert.match(engine, /const activeSources = new Map\(\)/);
   assert.match(engine, /activeSources\.set\(src, \{ lane: channel, gate: laneGate \}\)/);
   assert.match(engine, /refreshLaneStates\(\);\s*refreshActiveSourceAudibility\(\)/);
@@ -269,6 +303,27 @@ test('timed transport preserves section, tempo, monitor, and cancellation semant
   assert.ok(silentBranch, 'Silent-mode branch must exist');
   assert.match(silentBranch, /refreshMasterAudibility\(\)/);
   assert.doesNotMatch(silentBranch, /pause\(\)|stopSamples\(\)|ctx\.suspend/);
+});
+
+test('Tones to Voices resumes the active timed passage at its live source offset', () => {
+  const engine = fs.readFileSync(
+    path.join(ROOT, 'apps/web/public/prototypes/tracker-engine.js'),
+    'utf8',
+  );
+  assert.match(engine, /const timedPassageOffset = \(\) =>/);
+  assert.match(engine, /\(\(performance\.now\(\) - timedStartTs\) \/ 1000\) \* timedTempoScale/);
+  assert.match(engine, /const resumeTimedVoices = async \(\) =>/);
+  assert.match(
+    engine,
+    /const run = timedRunGeneration;[\s\S]*?const ready = await loadSamples\(\)/,
+  );
+  assert.match(engine, /resume !== timedVoiceResumeGeneration \|\| !timedRunIsActive\(run\)/);
+  assert.match(engine, /sectionTrimStart: ev\.sectionTrimStart \+ offset/);
+  assert.match(engine, /if \(SAMP\.loading\) return SAMP\.loading/);
+  assert.match(
+    engine,
+    /previousSoundMode === 'tone' \|\| activeSources\.size === 0[\s\S]*?void resumeTimedVoices\(\)/,
+  );
 });
 
 test('render tools stage atomic outputs beside their destinations and provide font fallbacks', () => {
@@ -459,6 +514,32 @@ test('mixer resolves symlink aliases through missing output directories', (conte
     assert.notEqual(result.status, 0, output);
     assert.match(output, /--out and --timeline-out must be different paths\./);
     assert.equal(fs.existsSync(path.join(realRoot, 'fresh')), false, 'guard must run before mkdir');
+    assert.doesNotMatch(output, /ffmpeg|ffprobe/i, 'guard must run before rendering');
+  });
+});
+
+test('mixer rejects a legacy score timeline before FFmpeg or output creation', () => {
+  withCliSandbox('mix-score-audio.mjs', ({ sandboxRoot, toolFile }) => {
+    const scoreId = writeLegacyNoTimingFixture(sandboxRoot);
+    const outputDirectory = path.join(sandboxRoot, 'uncreated-output');
+    const mixOut = path.join(outputDirectory, 'mix.wav');
+    const timelineOut = path.join(outputDirectory, 'timeline.json');
+    const result = spawnSync(
+      process.execPath,
+      [toolFile, '--score', scoreId, '--out', mixOut, '--timeline-out', timelineOut, '--force'],
+      {
+        cwd: sandboxRoot,
+        encoding: 'utf8',
+        env: { ...process.env, PATH: '' },
+      },
+    );
+    const output = `${result.stdout || ''}\n${result.stderr || ''}`;
+    assert.notEqual(result.status, 0, output);
+    assert.match(
+      output,
+      /Cannot write --timeline-out: mixed voice event "LEGACY\|no timing" lacks a non-empty Edge-TTS word-timing record\./,
+    );
+    assert.equal(fs.existsSync(outputDirectory), false, 'guard must run before output creation');
     assert.doesNotMatch(output, /ffmpeg|ffprobe/i, 'guard must run before rendering');
   });
 });

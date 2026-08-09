@@ -178,7 +178,6 @@ function main() {
       }
     }
   }
-  for (const [, output] of outputs) assertWritableOutput(output, options.force);
 
   const lanes = new Map(score.lanes.map((lane) => [lane.id, lane]));
   const events = score.events
@@ -186,6 +185,23 @@ function main() {
     .filter(({ event, lane }) => !event.silent && lane?.performer !== 'human')
     .sort((a, b) => eventStart(a.event) - eventStart(b.event));
   if (!events.length) fail('Score has no AI voice events to mix.');
+  if (timelineOut) {
+    const missingTiming = events.find(({ event }) => {
+      const speechText = event.speechText || event.text;
+      const words = voicePack.timings?.[`${event.lane}|${speechText}`]?.words;
+      return !Array.isArray(words) || words.length === 0;
+    });
+    if (missingTiming) {
+      const speechText = missingTiming.event.speechText || missingTiming.event.text;
+      fail(
+        `Cannot write --timeline-out: mixed voice event ${JSON.stringify(
+          `${missingTiming.event.lane}|${speechText}`,
+        )} lacks a non-empty Edge-TTS word-timing record.`,
+      );
+    }
+  }
+  // Validate exact-timeline eligibility before creating output directories or invoking FFmpeg.
+  for (const [, output] of outputs) assertWritableOutput(output, options.force);
 
   const temp = fs.mkdtempSync(path.join(path.dirname(out), '.speech-score-mix-'));
   const muxTemp = videoOut

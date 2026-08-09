@@ -225,7 +225,9 @@
     };
 
     // -- source 0: pre-rendered neural clips as Web Audio buffers --
-    const SAMP = { buf: new Map(), ready: false, loading: false };
+    // `loading` retains the decode promise so a later transport action can await the same work
+    // instead of racing ahead without clips.
+    const SAMP = { buf: new Map(), ready: false, loading: null };
     // Keep the lane gate with every long-running buffer source. Header changes can then mute or
     // solo an already-playing continuous passage without waiting for it to loop or retrigger.
     const activeSources = new Map();
@@ -261,11 +263,11 @@
       const off = i / buffer.sampleRate - 0.02;
       return off > 0 ? off : 0;
     };
-    const loadSamples = async () => {
-      if (SAMP.ready || SAMP.loading) return SAMP.ready;
-      if (!CLIPS || !ensureCtx() || !ctx) return false;
-      SAMP.loading = true;
-      await Promise.all(
+    const loadSamples = () => {
+      if (SAMP.ready) return Promise.resolve(true);
+      if (SAMP.loading) return SAMP.loading;
+      if (!CLIPS || !ensureCtx() || !ctx) return Promise.resolve(false);
+      SAMP.loading = Promise.all(
         Object.entries(CLIPS).map(async ([key, b64]) => {
           try {
             const buffer = await ctx.decodeAudioData(b64ToBuf(b64));
@@ -276,10 +278,15 @@
             /* skip an undecodable clip */
           }
         }),
-      );
-      SAMP.ready = SAMP.buf.size > 0;
-      SAMP.loading = false;
-      return SAMP.ready;
+      )
+        .then(() => {
+          SAMP.ready = SAMP.buf.size > 0;
+          return SAMP.ready;
+        })
+        .finally(() => {
+          SAMP.loading = null;
+        });
+      return SAMP.loading;
     };
     // Play one line on one lane: that character's own neural clip, humanized + panned. Per-clip
     // AUDIO CRAFT (L6) is honored straight from the event: trimStart/trimEnd (seconds off head/tail),
@@ -558,6 +565,9 @@
     let timedLaneOffsets = new Map();
     let timedPassageDuration = 0;
     let timedTempoScale = 1;
+    // A new timed run invalidates any delayed Voice-mode resume from the preceding run.
+    let timedRunGeneration = 0;
+    let timedVoiceResumeGeneration = 0;
     // L5 — live human+AI performance
     let cue = false; // cue mode: a human drives the pace (Space advances), AI answers on its rows
     let cued = false; // has the first line been struck since (re)entering cue mode
@@ -582,6 +592,8 @@
     // but use the score's full tick count as the exclusive end for continuous-passage transport.
     const timedRange = () => (sel === 'full' ? [0, TOTAL] : SECTIONS[sel]);
     const clearPerformed = () => {
+      timedRunGeneration += 1;
+      timedVoiceResumeGeneration += 1;
       for (const ev of EV) {
         if (ev.el) ev.el.classList.remove('spoken', 'now');
       }
@@ -709,14 +721,51 @@
       const tempoScale = tempoBps / scoreTempoBps;
       const plan = planTimedPassage(sectionStart, sectionEnd, tempoScale);
       if (!plan) return false;
+      timedRunGeneration += 1;
       timedLaneOffsets = plan.offsets;
       timedTempoScale = tempoScale;
-      // The grid, not the longest audio tail, owns loop length. This honors score.total/tempo for
-      // the whole score and section beat spans for drills, including live tempo-slider changes.
-      timedPassageDuration = (sectionEnd - sectionStart) / SUBDIV / tempoBps;
+      // Keep authored score-tail beats, but never reset a section drill while a planned excerpt
+      // still has words left to say. Both durations are in wall-clock seconds at this tempo.
+      const gridDuration = (sectionEnd - sectionStart) / SUBDIV / tempoBps;
+      const excerptDuration = plan.passageDuration / tempoScale;
+      timedPassageDuration = Math.max(gridDuration, excerptDuration);
       timedStartTs = performance.now() + 15;
       hasStruckCurrent = true;
       voice(plan.passageEvents);
+      return true;
+    };
+    const timedPassageOffset = () =>
+      timedStartTs === null
+        ? 0
+        : Math.max(0, ((performance.now() - timedStartTs) / 1000) * timedTempoScale);
+    const timedRunIsActive = (run) =>
+      !destroyed &&
+      playing &&
+      timedStartTs !== null &&
+      run === timedRunGeneration &&
+      soundMode === 'voice' &&
+      !silent;
+    const resumeTimedVoices = async () => {
+      if (!timedCues || !CLIPS || timedStartTs === null) return false;
+      const run = timedRunGeneration;
+      const resume = ++timedVoiceResumeGeneration;
+      const ready = await loadSamples();
+      // Decoding can outlive a pause, section change, or another monitor choice. Only the same
+      // running passage may recreate sources, and it must still be explicitly in Voices mode.
+      if (!ready || resume !== timedVoiceResumeGeneration || !timedRunIsActive(run)) return false;
+      const [sectionStart, sectionEnd] = timedRange();
+      const plan = planTimedPassage(sectionStart, sectionEnd, timedTempoScale);
+      if (!plan) return false;
+      const offset = timedPassageOffset();
+      const resumedEvents = plan.passageEvents
+        .map((ev) => ({ ...ev, sectionTrimStart: ev.sectionTrimStart + offset }))
+        .filter((ev) => {
+          const sourceStart = (ev.trimStart || 0) + ev.sectionTrimStart;
+          const sourceEnd = ev.timingEnd - Math.max(0, ev.trimEnd || 0);
+          return sourceStart < sourceEnd;
+        });
+      if (!resumedEvents.length) return false;
+      voice(resumedEvents);
       return true;
     };
 
@@ -1038,16 +1087,27 @@
         refreshActiveSourceAudibility();
         return;
       }
+      const previousSoundMode = soundMode;
       silent = false;
       soundMode = m;
-      if (m !== 'voice') stopSamples();
+      if (m !== 'voice') {
+        timedVoiceResumeGeneration += 1;
+        stopSamples();
+      }
       ensureCtx();
       refreshMasterAudibility();
       refreshActiveSourceAudibility();
       if (ctx && ctx.state === 'suspended') ctx.resume();
       if (m === 'voice') {
-        if (CLIPS) loadSamples();
-        else if (synth) {
+        if (CLIPS) {
+          // Tones intentionally stops the continuous clips while the timed visual clock keeps
+          // advancing. Restore their current source offset rather than restarting the section.
+          if (timedCues && playing && (previousSoundMode === 'tone' || activeSources.size === 0)) {
+            void resumeTimedVoices();
+          } else {
+            void loadSamples();
+          }
+        } else if (synth) {
           loadVoices();
           synth.resume();
         }
