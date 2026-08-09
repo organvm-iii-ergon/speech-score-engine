@@ -156,12 +156,9 @@ for (const score of targetScores) {
     try {
       const rendered = render(lane.voice, lane.rate || '+0%', speechText);
       clips[key] = rendered.clip;
-      // `speechText` marks a continuous passage whose visual rows are derived from one source clip.
-      // Only those clips opt into deterministic playback and preserved source pre-roll. Legacy
-      // one-event-per-line scores keep their prior stagger, detune, LFO, and leading-silence trim.
-      if (typeof ev.speechText === 'string' && ev.speechText.length > 0) {
-        timings[key] = rendered.timing;
-      }
+      // Timings come from the same stream as every rendered clip. Continuous passages use them
+      // for word-level cues; row-complete trackers use their measured duration as the next-row gate.
+      timings[key] = rendered.timing;
       done += 1;
     } catch (e) {
       failures += 1;

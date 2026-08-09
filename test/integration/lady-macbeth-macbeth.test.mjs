@@ -11,6 +11,7 @@ import {
   deriveScoreTotal,
   renameContinuousPassageLine,
 } from '../../apps/web/src/lib/scoreEditing.js';
+import { deriveRowCompleteSchedule } from '../../tools/row-complete-schedule.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const SCORE_ID = 'lady-macbeth-macbeth';
@@ -59,6 +60,7 @@ function withCliSandbox(tool, callback) {
   const sandboxRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lady-macbeth-score-test-'));
   try {
     const toolFile = copyIntoSandbox(sandboxRoot, `tools/${tool}`);
+    copyIntoSandbox(sandboxRoot, 'tools/row-complete-schedule.mjs');
     const scoreFile = copyIntoSandbox(sandboxRoot, SCORE_RELATIVE);
     const voiceFile = copyIntoSandbox(sandboxRoot, VOICE_RELATIVE);
     const inputs = path.join(sandboxRoot, 'test-inputs');
@@ -355,9 +357,10 @@ async function emitTrackerClick(element, target = element) {
 const score = evaluateRegistration(SCORE_FILE, 'SSE_SCORES');
 const voicePack = evaluateRegistration(VOICE_FILE, 'SSE_VOICES');
 
-test('score preserves the nine simultaneous left/right pairs and lane geometry', () => {
+test('score preserves the nine simultaneous left/right pairs and row-complete lane geometry', () => {
   assert.ok(score, 'score must self-register');
   assert.deepEqual(score.visualPairs, EXPECTED_PAIRS);
+  assert.equal(score.playback, 'row-complete');
   assert.deepEqual(
     score.lanes.map(({ id, align }) => ({ id, align })),
     [
@@ -366,31 +369,18 @@ test('score preserves the nine simultaneous left/right pairs and lane geometry',
     ],
   );
 
-  const triggers = score.events.filter((event) => !event.silent);
-  assert.equal(triggers.length, 2);
-  assert.deepEqual(
-    triggers.map((event) => ({ lane: event.lane, start: event.start ?? event.row })),
-    [
-      { lane: 'LADY_MACBETH', start: 0 },
-      { lane: 'MACBETH', start: 0 },
-    ],
-  );
-  assert.ok(
-    triggers.every((event) => event.speechText),
-    'both row-zero events trigger full passages',
-  );
-
-  for (let row = 1; row < EXPECTED_PAIRS.length; row += 1) {
-    const continuation = score.events.filter((event) => event.row === row);
-    assert.equal(continuation.length, 2, `row ${row} must retain both visual lanes`);
-    assert.ok(
-      continuation.every((event) => event.silent),
-      `row ${row} must not retrigger audio`,
+  assert.equal(score.events.length, EXPECTED_PAIRS.length * score.lanes.length);
+  for (let row = 0; row < EXPECTED_PAIRS.length; row += 1) {
+    const pair = score.events.filter((event) => event.row === row);
+    assert.equal(pair.length, 2, `row ${row} must contain both player lines`);
+    assert.deepEqual(
+      pair.map((event) => ({ lane: event.lane, text: event.text })),
+      [
+        { lane: 'LADY_MACBETH', text: EXPECTED_PAIRS[row][0] },
+        { lane: 'MACBETH', text: EXPECTED_PAIRS[row][1] },
+      ],
     );
-    assert.ok(
-      continuation.every((event) => event.speechText === undefined),
-      `row ${row} must not carry a second passage trigger`,
-    );
+    assert.ok(pair.every((event) => !event.silent && event.speechText === undefined));
   }
 });
 
@@ -409,66 +399,52 @@ test('dramatic sections are a nonoverlapping half-open partition of all nine pai
   assert.equal(new Set(coveredRows).size, coveredRows.length);
 });
 
-test('generated timings cover every visual line sequentially in its own lane', () => {
+test('generated timings cover every rendered line in its own lane', () => {
   assert.ok(voicePack, 'voice pack must self-register');
-  assert.equal(voicePack.count, 2);
-  assert.equal(Object.keys(voicePack.clips).length, 2);
-  assert.equal(Object.keys(voicePack.timings).length, 2);
+  assert.equal(voicePack.count, score.events.length);
+  assert.equal(Object.keys(voicePack.clips).length, score.events.length);
+  assert.equal(Object.keys(voicePack.timings).length, score.events.length);
 
   score.lanes.forEach((lane, laneIndex) => {
-    const trigger = score.events.find((event) => event.lane === lane.id && !event.silent);
-    assert.ok(trigger?.speechText, `${lane.id} must own one continuous passage`);
-    const key = `${lane.id}|${trigger.speechText}`;
-    const timing = voicePack.timings[key];
-    assert.ok(voicePack.clips[key], `${lane.id} clip must match its passage key`);
-    assert.ok(timing, `${lane.id} timing must match its passage key`);
-    assert.equal(timing.voice, lane.voice);
-    assert.equal(timing.rate, lane.rate);
-
-    let cursor = 0;
-    for (const pair of score.visualPairs) {
-      const expected = tokens(pair[laneIndex]);
-      const actual = timing.words
-        .slice(cursor, cursor + expected.length)
-        .map((word) => tokens(word.text)[0]);
-      assert.deepEqual(
-        actual,
-        expected,
-        `${lane.id} timing must cover ${JSON.stringify(pair[laneIndex])}`,
+    for (const [row, pair] of score.visualPairs.entries()) {
+      const event = score.events.find(
+        (candidate) => candidate.row === row && candidate.lane === lane.id,
       );
-      cursor += expected.length;
+      const key = `${lane.id}|${event.text}`;
+      const timing = voicePack.timings[key];
+      assert.ok(voicePack.clips[key], `${lane.id} row ${row} clip must match its line key`);
+      assert.ok(timing, `${lane.id} row ${row} timing must match its line key`);
+      assert.equal(timing.voice, lane.voice);
+      assert.equal(timing.rate, lane.rate);
+      assert.deepEqual(
+        timing.words.map((word) => tokens(word.text)[0]),
+        tokens(pair[laneIndex]),
+        `${lane.id} row ${row} timing must cover ${JSON.stringify(pair[laneIndex])}`,
+      );
     }
-    assert.equal(cursor, timing.words.length, `${lane.id} must have no unused timing words`);
   });
 });
 
-test('generated passages use natural word speed and phrase-led pauses', () => {
-  assert.equal(score.total / score.tempo, 20, 'the reel must provide a twenty-second visual score');
+test('row-complete schedule starts each pair together and waits for both natural-speed reads', () => {
+  const schedule = deriveRowCompleteSchedule(score, voicePack);
+  assert.ok(schedule);
+  assert.equal(schedule.rows.length, EXPECTED_PAIRS.length);
+  assert.ok(schedule.duration > 0);
 
-  const expectedDurationRanges = {
-    LADY_MACBETH: [11, 14],
-    MACBETH: [18, 20],
-  };
   for (const lane of score.lanes) {
-    assert.equal(lane.rate, '-15%', `${lane.id} should use only a modest rate adjustment`);
-    assert.equal(
-      lane.speech.targetSeconds,
-      undefined,
-      `${lane.id} must not stretch rendered speech`,
-    );
-    const trigger = score.events.find((event) => event.lane === lane.id && !event.silent);
-    const timing = voicePack.timings[`${lane.id}|${trigger.speechText}`];
-    const [minimum, maximum] = expectedDurationRanges[lane.id];
-    assert.ok(
-      timing.duration >= minimum && timing.duration <= maximum,
-      `${lane.id} must use phrase pauses without elongating every word`,
-    );
+    assert.equal(lane.rate, '+0%', `${lane.id} must keep normal rendered word speed`);
   }
+  schedule.rows.forEach((row, index) => {
+    assert.equal(row.clips.length, score.lanes.length, `row ${row.row} must start both players`);
+    assert.ok(row.clips.every((clip) => clip.start === row.start));
+    assert.equal(row.duration, Math.max(...row.clips.map((clip) => clip.timing.duration)));
+    if (index > 0) assert.equal(row.start, schedule.rows[index - 1].end);
+  });
 });
 
 test('credits identify the poem, artwork/source, and remix without presenting play dialogue', () => {
   assert.equal(score.byline, 'poem @two.be · artwork @amaanjahangir');
-  assert.match(score.caption, /visual-and-audio remix/i);
+  assert.match(score.caption, /synchronized two-player tracker/i);
   const scoreSource = fs.readFileSync(SCORE_FILE, 'utf8');
   const homeSource = fs.readFileSync(path.join(ROOT, 'apps/web/src/app/page.tsx'), 'utf8');
   const reelSource = fs.readFileSync(path.join(ROOT, 'tools/render-story-reel.mjs'), 'utf8');
@@ -538,14 +514,23 @@ test('missing score totals derive a finite extent that covers their clips', () =
   assert.equal(deriveScoreTotal(Number.NaN, []), 1);
 });
 
-test('tracker gives timed continuous passages an audible Live cue with half-open section bounds', () => {
+test('tracker keeps continuous-passage cues and derives row-complete tracker boundaries', () => {
   const engine = fs.readFileSync(
     path.join(ROOT, 'apps/web/public/prototypes/tracker-engine.js'),
     'utf8',
   );
+  assert.match(engine, /const deriveRowCompletePlan = \(\) =>/);
+  assert.match(engine, /SC\.playback !== 'row-complete' \|\| !TIMINGS/);
+  assert.match(
+    engine,
+    /const duration = Math\.max\(\.\.\.clips\.map\(\(clip\) => clip\.timing\.duration\)\)/,
+  );
+  assert.match(engine, /const startRowCompletePassage = \(\) =>/);
+  assert.match(engine, /scheduleSeconds: row\.start - rowCompleteOffset/);
+  assert.match(engine, /if \(rowCompletePlan && timedStartTs !== null\)/);
   assert.match(engine, /const playTimedCueRow = \(row\) =>/);
   assert.match(engine, /if \(timedCues && cue\)[\s\S]*?playTimedCueRow\(row\);[\s\S]*?return;/);
-  assert.match(engine, /timedCues \? r < e : r <= e/);
+  assert.match(engine, /timedCues \|\| rowCompletePlan \? r < e : r <= e/);
   assert.match(engine, /TIMINGS\[`\$\{lane\}\|\$\{sourceEvent\.speechText\}`\]/);
   assert.doesNotMatch(engine, /Object\.entries\(TIMINGS\)\.find/);
   assert.match(
@@ -616,42 +601,28 @@ test('Tones to Voices resumes the active timed passage at its live source offset
   );
 });
 
-test('runtime timed transport resumes Voices in phase and lets the mirror excerpt finish', async () => {
+test('runtime row-complete transport schedules both lanes together and waits for the longer line', async () => {
   const tracker = mountTimedTracker();
-  const mirrorButton = tracker.ui
-    .get('.t-sections')
-    .children.find((button) => button.dataset.s === 'mirror');
-  assert.ok(mirrorButton, 'the Mirror section button must be mounted');
-  await emitTrackerClick(tracker.ui.get('.t-sections'), mirrorButton);
   await emitTrackerClick(tracker.ui.get('.t-play'));
-  assert.equal(tracker.starts.length, 2, 'both timed lanes must start together');
-  const initialOffsets = tracker.starts.map((start) => start.offset);
-
-  tracker.setNow(1015);
-  await emitTrackerClick(tracker.sound, tracker.toneButton);
-  assert.equal(tracker.starts.length, 2, 'Tones must stop rather than restart voice sources');
-  await emitTrackerClick(tracker.sound, tracker.voiceButton);
-  assert.equal(tracker.starts.length, 4, 'Voices must recreate both timed sources');
-  tracker.starts.slice(2).forEach((start, index) => {
-    assert.ok(
-      Math.abs(start.offset - (initialOffsets[index] + 1)) < 1e-6,
-      `lane ${index} must resume one second into its live source, got ${start.offset}`,
-    );
-  });
-
-  tracker.setNow(2200);
-  const loop = [...tracker.animationFrames.values()][0];
-  assert.ok(loop, 'timed performance must have a pending animation frame');
-  loop(2200);
+  const schedule = deriveRowCompleteSchedule(score, voicePack);
   assert.equal(
     tracker.starts.length,
-    4,
-    'the two-second mirror grid must not cut its longer planned excerpt off mid-line',
+    score.events.length,
+    'every player line must receive its own clip',
   );
+  schedule.rows.forEach((row, index) => {
+    const pair = tracker.starts.slice(index * score.lanes.length, (index + 1) * score.lanes.length);
+    assert.equal(pair.length, score.lanes.length);
+    assert.equal(pair[0].when, pair[1].when, `row ${row.row} must start both players together`);
+    assert.ok(
+      Math.abs(pair[0].when - (0.015 + row.start)) < 1e-6,
+      `row ${row.row} must begin only after the previous row's longer clip ends`,
+    );
+  });
   tracker.mounted.destroy();
 });
 
-test('runtime timed Tones sounds every visual lane line exactly once', async () => {
+test('runtime row-complete Tones sounds both players exactly once per tracker row', async () => {
   const tracker = mountTimedTracker();
   await emitTrackerClick(tracker.sound, tracker.toneButton);
   await emitTrackerClick(tracker.ui.get('.t-play'));
@@ -659,7 +630,8 @@ test('runtime timed Tones sounds every visual lane line exactly once', async () 
 
   const loop = [...tracker.animationFrames.values()][0];
   assert.ok(loop, 'timed performance must have a pending animation frame');
-  for (let timestamp = 0; timestamp < (score.total / score.tempo) * 1000; timestamp += 50) {
+  const schedule = deriveRowCompleteSchedule(score, voicePack);
+  for (let timestamp = 0; timestamp < schedule.duration * 1000; timestamp += 25) {
     tracker.setNow(timestamp);
     loop(timestamp);
   }
@@ -667,7 +639,7 @@ test('runtime timed Tones sounds every visual lane line exactly once', async () 
   assert.equal(
     tracker.oscillatorStarts.length,
     score.events.length,
-    'the opening pair plus every silent visual continuation must cue once',
+    'every synchronized tracker row must cue both players once',
   );
   for (const lane of score.lanes) {
     assert.equal(
@@ -684,7 +656,11 @@ test('runtime deferred voice decode cannot resume after the user leaves Voices',
   await emitTrackerClick(tracker.sound, tracker.toneButton);
   await emitTrackerClick(tracker.ui.get('.t-play'));
   await emitTrackerClick(tracker.sound, tracker.voiceButton);
-  assert.equal(tracker.pendingDecodes.length, 2, 'Voices must wait for both clip decodes');
+  assert.equal(
+    tracker.pendingDecodes.length,
+    score.events.length,
+    'Voices must wait for every line clip',
+  );
   await emitTrackerClick(tracker.sound, tracker.toneButton);
   for (const resolve of tracker.pendingDecodes) resolve();
   await flushTrackerWork();
@@ -702,7 +678,8 @@ test('render tools stage atomic outputs beside their destinations and provide fo
   const frames = fs.readFileSync(path.join(ROOT, 'tools/render-story-frames.py'), 'utf8');
   assert.match(mixer, /mkdtempSync\(path\.join\(path\.dirname\(out\),/);
   assert.match(reel, /mkdtempSync\(path\.join\(path\.dirname\(out\),/);
-  assert.match(reel, /voicePack\.timings\[`\$\{lane\.id\}\|\$\{sourceEvent\.speechText\}`\]/);
+  assert.match(mixer, /deriveRowCompleteSchedule\(score, voicePack\)/);
+  assert.match(reel, /deriveRowCompleteSchedule\(score, voicePack\)/);
   assert.match(frames, /ImageFont\.load_default/);
   assert.match(frames, /DejaVuSerif/);
 });
@@ -715,10 +692,7 @@ test('voice generation preserves legacy playback and cannot publish failed rende
     renderer,
     /if \(!canImportEdgeTts\(\)\)[\s\S]*?pip[\s\S]*?if \(!canImportEdgeTts\(\)\)[\s\S]*?throw new Error/,
   );
-  assert.match(
-    renderer,
-    /typeof ev\.speechText === 'string'[\s\S]*?timings\[key\] = rendered\.timing/,
-  );
+  assert.match(renderer, /timings\[key\] = rendered\.timing/);
   assert.match(renderer, /`--rate=\$\{rate\}`/);
   assert.doesNotMatch(renderer, /targetSeconds|atempo=/);
   assert.match(renderer, /if \(failures > 0 \|\| clipCount === 0\)/);

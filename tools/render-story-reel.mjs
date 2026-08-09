@@ -6,13 +6,16 @@
 //     --audio out/lady-macbeth-macbeth-performance.wav \
 //     --out out/lady-macbeth-macbeth-reel.mp4 --force
 //
-// The generated voice pack is the visual timing authority. Each column advances independently
-// from the word boundaries captured in the same Edge-TTS stream as the mixed audio clip.
+// The generated voice pack is the visual timing authority. Continuous-passage scores advance each
+// column from word boundaries; row-complete trackers advance both columns together after the
+// longer measured line in the pair finishes.
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
+
+import { clipKey, deriveRowCompleteSchedule } from './row-complete-schedule.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SCORE_DIR = path.join(ROOT, 'apps/web/public/prototypes/scores');
@@ -145,26 +148,36 @@ function main() {
   if (fs.existsSync(out) && !options.force) fail(`Refusing to replace ${path.relative(ROOT, out)} without --force.`);
   fs.mkdirSync(path.dirname(out), { recursive: true });
 
-  const duration = score.total / score.tempo;
-  const lanes = score.lanes.map((lane, laneIndex) => {
-    const sourceEvent = score.events.find(
-      (event) => event.lane === lane.id && event.speechText && !event.silent,
-    );
-    const timing = sourceEvent
-      ? voicePack.timings[`${lane.id}|${sourceEvent.speechText}`]
-      : null;
-    if (!timing) fail(`Missing timing for lane ${lane.id}`);
-    return {
-      id: lane.id,
-      name: lane.name,
-      align: lane.align,
-      cues: lineCues(
-        score.visualPairs.map((pair) => pair[laneIndex]),
-        timing.words,
-        lane.id,
-      ),
-    };
-  });
+  const rowCompleteSchedule = deriveRowCompleteSchedule(score, voicePack);
+  const duration = rowCompleteSchedule?.duration ?? score.total / score.tempo;
+  const lanes = rowCompleteSchedule
+    ? score.lanes.map((lane) => ({
+        id: lane.id,
+        name: lane.name,
+        align: lane.align,
+        cues: rowCompleteSchedule.rows.map((row) => {
+          const clip = row.clips.find(({ event }) => event.lane === lane.id);
+          if (!clip) fail(`Row ${row.row} is missing lane ${lane.id}`);
+          return { line: clip.event.text, start: row.start, end: row.end };
+        }),
+      }))
+    : score.lanes.map((lane, laneIndex) => {
+        const sourceEvent = score.events.find(
+          (event) => event.lane === lane.id && event.speechText && !event.silent,
+        );
+        const timing = sourceEvent ? voicePack.timings[clipKey(sourceEvent)] : null;
+        if (!timing) fail(`Missing timing for lane ${lane.id}`);
+        return {
+          id: lane.id,
+          name: lane.name,
+          align: lane.align,
+          cues: lineCues(
+            score.visualPairs.map((pair) => pair[laneIndex]),
+            timing.words,
+            lane.id,
+          ),
+        };
+      });
   const spec = {
     duration,
     fps: 30,
