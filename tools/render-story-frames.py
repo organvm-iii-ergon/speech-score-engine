@@ -13,9 +13,38 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 WIDTH = 1080
 HEIGHT = 1920
-REGULAR = "/System/Library/Fonts/Supplemental/Georgia.ttf"
-ITALIC = "/System/Library/Fonts/Supplemental/Georgia Italic.ttf"
-BOLD = "/System/Library/Fonts/Supplemental/Georgia Bold.ttf"
+FONT_FILES = {
+    "regular": [
+        "/System/Library/Fonts/Supplemental/Georgia.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf",
+        "C:/Windows/Fonts/georgia.ttf",
+    ],
+    "italic": [
+        "/System/Library/Fonts/Supplemental/Georgia Italic.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Italic.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSerif-Italic.ttf",
+        "C:/Windows/Fonts/georgiai.ttf",
+    ],
+    "bold": [
+        "/System/Library/Fonts/Supplemental/Georgia Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSerif-Bold.ttf",
+        "C:/Windows/Fonts/georgiab.ttf",
+    ],
+}
+
+
+def load_font(style: str, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    for candidate in FONT_FILES[style]:
+        try:
+            return ImageFont.truetype(candidate, size)
+        except OSError:
+            continue
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
 
 
 def parse_args() -> argparse.Namespace:
@@ -57,8 +86,8 @@ def build_base(spec: dict[str, object], art_path: Path) -> Image.Image:
     draw = ImageDraw.Draw(image, "RGBA")
     draw.rectangle((70, 665, 1009, 1748), outline=(215, 209, 197, 255), width=1)
 
-    italic = ImageFont.truetype(ITALIC, 27)
-    regular = ImageFont.truetype(REGULAR, 18)
+    italic = load_font("italic", 27)
+    regular = load_font("regular", 18)
     lanes = spec["lanes"]
     right_text(draw, (512, 96), lanes[0]["name"].lower(), font=italic, fill=(22, 21, 18, 255))
     draw.text((568, 96), lanes[1]["name"].lower(), font=italic, fill=(22, 21, 18, 255))
@@ -69,8 +98,8 @@ def build_base(spec: dict[str, object], art_path: Path) -> Image.Image:
 def render_frame(base: Image.Image, spec: dict[str, object], moment: float) -> Image.Image:
     image = base.copy()
     draw = ImageDraw.Draw(image, "RGBA")
-    regular = ImageFont.truetype(REGULAR, 28)
-    bold = ImageFont.truetype(BOLD, 28)
+    regular = load_font("regular", 28)
+    bold = load_font("bold", 28)
     first_y = 166
     line_step = 43
 

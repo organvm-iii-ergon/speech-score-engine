@@ -37,16 +37,44 @@ const VENV = path.join(ROOT, 'tools/.venv');
 const CACHE = path.join(ROOT, 'tools/.cache');
 const PYTHON = path.join(VENV, 'bin/python');
 const EDGE_RENDERER = path.join(ROOT, 'tools/render-edge-tts.py');
-fs.mkdirSync(CACHE, { recursive: true });
-fs.mkdirSync(VOICES_DIR, { recursive: true });
+const PROBE_TIMEOUT_MS = 10_000;
+const BOOTSTRAP_TIMEOUT_MS = 60_000;
+const INSTALL_TIMEOUT_MS = 120_000;
+
+const canImportEdgeTts = () => {
+  if (!fs.existsSync(PYTHON)) return false;
+  try {
+    execFileSync(PYTHON, ['-c', 'import edge_tts'], {
+      stdio: 'ignore',
+      timeout: PROBE_TIMEOUT_MS,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 if (!fs.existsSync(PYTHON)) {
   console.log('bootstrapping tools/.venv with edge-tts ...');
-  execFileSync('python3', ['-m', 'venv', VENV], { stdio: 'inherit' });
-  execFileSync(path.join(VENV, 'bin/pip'), ['install', '--quiet', '--upgrade', 'pip', 'edge-tts'], {
+  execFileSync('python3', ['-m', 'venv', VENV], {
     stdio: 'inherit',
+    timeout: BOOTSTRAP_TIMEOUT_MS,
   });
 }
+if (!canImportEdgeTts()) {
+  console.log('installing edge-tts into tools/.venv ...');
+  execFileSync(PYTHON, ['-m', 'pip', 'install', '--quiet', '--upgrade', 'edge-tts'], {
+    stdio: 'inherit',
+    timeout: INSTALL_TIMEOUT_MS,
+  });
+}
+if (!canImportEdgeTts()) {
+  throw new Error('tools/.venv cannot import edge_tts after one bounded install attempt');
+}
+
+// Dependency admission completes before any output-pack directory or file is created.
+fs.mkdirSync(CACHE, { recursive: true });
+fs.mkdirSync(VOICES_DIR, { recursive: true });
 
 // Load every score by evaluating its data file in a sandbox that stands in for the browser window.
 const sandbox = {};
@@ -107,6 +135,7 @@ for (const score of targetScores) {
   const timings = {};
   const seen = new Set();
   let done = 0;
+  let failures = 0;
   const aiEvents = score.events.filter(
     (e) => !e.silent && (laneById.get(e.lane) || {}).performer !== 'human',
   );
@@ -116,20 +145,38 @@ for (const score of targetScores) {
     if (seen.has(key)) continue;
     seen.add(key);
     const lane = laneById.get(ev.lane);
-    if (!lane || !lane.voice) continue;
+    if (!lane || !lane.voice) {
+      failures += 1;
+      console.log(`FAIL ${score.id} ${key}: AI lane has no neural voice`);
+      continue;
+    }
     try {
       const rendered = render(lane.voice, lane.rate || '+0%', speechText);
       clips[key] = rendered.clip;
-      timings[key] = rendered.timing;
+      // `speechText` marks a continuous passage whose visual rows are derived from one source clip.
+      // Only those clips opt into deterministic playback and preserved source pre-roll. Legacy
+      // one-event-per-line scores keep their prior stagger, detune, LFO, and leading-silence trim.
+      if (typeof ev.speechText === 'string' && ev.speechText.length > 0) {
+        timings[key] = rendered.timing;
+      }
       done += 1;
     } catch (e) {
+      failures += 1;
       console.log(`FAIL ${score.id} ${key}: ${String(e.message).slice(0, 90)}`);
     }
+  }
+  const clipCount = Object.keys(clips).length;
+  if (failures > 0 || clipCount === 0) {
+    const message = `${score.id}: refusing to replace its generated pack after ${failures} failure(s) and ${clipCount} successful clip(s)`;
+    if (requestedScoreId) throw new Error(message);
+    console.log(`SKIP ${message}`);
+    process.exitCode = 1;
+    continue;
   }
   const payload = {
     source: 'edge-tts (Microsoft neural)',
     format: 'audio/mpeg',
-    count: Object.keys(clips).length,
+    count: clipCount,
     clips,
     timings,
   };
@@ -144,7 +191,13 @@ for (const score of targetScores) {
 })();
 `;
   const out = path.join(VOICES_DIR, `${score.id}.js`);
-  fs.writeFileSync(out, header + body);
+  const pendingOut = `${out}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(pendingOut, header + body);
+    fs.renameSync(pendingOut, out);
+  } finally {
+    fs.rmSync(pendingOut, { force: true });
+  }
   console.log(
     `WROTE ${path.relative(ROOT, out)} — ${payload.count} clips, ${(fs.statSync(out).size / 1024).toFixed(0)} KB (${done} rendered)`,
   );

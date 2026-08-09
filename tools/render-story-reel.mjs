@@ -10,7 +10,6 @@
 // from the word boundaries captured in the same Edge-TTS stream as the mixed audio clip.
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
@@ -63,14 +62,18 @@ function projectPath(candidate) {
 
 function comparablePath(file) {
   const resolved = path.resolve(file);
+  let existing = resolved;
+  const missingSegments = [];
+  while (!fs.existsSync(existing)) {
+    const parent = path.dirname(existing);
+    if (parent === existing) return resolved;
+    missingSegments.unshift(path.basename(existing));
+    existing = parent;
+  }
   try {
-    return fs.realpathSync(resolved);
+    return path.join(fs.realpathSync(existing), ...missingSegments);
   } catch {
-    try {
-      return path.join(fs.realpathSync(path.dirname(resolved)), path.basename(resolved));
-    } catch {
-      return resolved;
-    }
+    return resolved;
   }
 }
 
@@ -144,15 +147,20 @@ function main() {
 
   const duration = score.total / score.tempo;
   const lanes = score.lanes.map((lane, laneIndex) => {
-    const entry = Object.entries(voicePack.timings).find(([key]) => key.startsWith(`${lane.id}|`));
-    if (!entry) fail(`Missing timing for lane ${lane.id}`);
+    const sourceEvent = score.events.find(
+      (event) => event.lane === lane.id && event.speechText && !event.silent,
+    );
+    const timing = sourceEvent
+      ? voicePack.timings[`${lane.id}|${sourceEvent.speechText}`]
+      : null;
+    if (!timing) fail(`Missing timing for lane ${lane.id}`);
     return {
       id: lane.id,
       name: lane.name,
       align: lane.align,
       cues: lineCues(
         score.visualPairs.map((pair) => pair[laneIndex]),
-        entry[1].words,
+        timing.words,
         lane.id,
       ),
     };
@@ -164,7 +172,7 @@ function main() {
     credit: 'poem @two.be  ·  artwork @amaanjahangir  ·  audio remix',
   };
 
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'speech-score-story-'));
+  const temp = fs.mkdtempSync(path.join(path.dirname(out), '.speech-score-story-'));
   const specFile = path.join(temp, 'spec.json');
   const temporaryOut = path.join(temp, 'reel.mp4');
   try {
