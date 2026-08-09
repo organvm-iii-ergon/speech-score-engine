@@ -7,6 +7,11 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 
+import {
+  deriveScoreTotal,
+  renameContinuousPassageLine,
+} from '../../apps/web/src/lib/scoreEditing.js';
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const SCORE_ID = 'lady-macbeth-macbeth';
 const SCORE_RELATIVE = `apps/web/public/prototypes/scores/${SCORE_ID}.js`;
@@ -170,6 +175,7 @@ function mountTimedTracker({ deferDecode = false } = {}) {
   let now = 0;
   let nextAnimationFrame = 1;
   const animationFrames = new Map();
+  const oscillatorStarts = [];
   const starts = [];
   const pendingDecodes = [];
   const decodedBuffer = {
@@ -224,8 +230,15 @@ function mountTimedTracker({ deferDecode = false } = {}) {
 
     createOscillator() {
       const oscillator = fakeElement('oscillator');
-      oscillator.frequency = { setValueAtTime: () => {} };
-      oscillator.start = () => {};
+      oscillator.frequency = {
+        value: 0,
+        setValueAtTime: (value) => {
+          oscillator.frequency.value = value;
+        },
+      };
+      oscillator.start = (when) => {
+        oscillatorStarts.push({ frequency: oscillator.frequency.value, when });
+      };
       oscillator.stop = () => oscillator.onended?.();
       return oscillator;
     }
@@ -315,6 +328,7 @@ function mountTimedTracker({ deferDecode = false } = {}) {
   return {
     animationFrames,
     mounted,
+    oscillatorStarts,
     pendingDecodes,
     setNow: (value) => {
       now = value;
@@ -473,14 +487,31 @@ test('library, tracker, editor, and standalone source all register the score lan
   assert.match(standalone, /voices\/lady-macbeth-macbeth\.js/);
 });
 
-test('editing a continuous-passage trigger invalidates its stale generated speech key', () => {
-  const editor = fs.readFileSync(
-    path.join(ROOT, 'apps/web/src/components/EditorClient.tsx'),
-    'utf8',
+test('editing a continuous-passage continuation rebuilds its source passage in visual order', () => {
+  const events = [
+    { id: 'trigger', lane: 'A', text: 'first', speechText: 'first second third', start: 0 },
+    { id: 'middle', lane: 'A', text: 'second', silent: true, start: 1 },
+    { id: 'other', lane: 'B', text: 'other', start: 1 },
+    { id: 'last', lane: 'A', text: 'third', silent: true, start: 2 },
+  ];
+  const renamed = renameContinuousPassageLine(events, 'middle', 'changed second');
+  assert.equal(renamed.find((event) => event.id === 'middle')?.text, 'changed second');
+  assert.equal(
+    renamed.find((event) => event.id === 'trigger')?.speechText,
+    'first changed second third',
   );
-  assert.match(editor, /const renameClip = \(text: string\) =>/);
-  assert.match(editor, /speechText: undefined/);
-  assert.match(editor, /onChange=\{\(e\) => renameClip\(e\.target\.value\)\}/);
+  assert.equal(events[0].speechText, 'first second third', 'helper must not mutate imported state');
+});
+
+test('missing score totals derive a finite extent that covers their clips', () => {
+  assert.equal(
+    deriveScoreTotal(undefined, [
+      { row: 0, beats: 1 },
+      { start: 3.25, beats: 1.5 },
+    ]),
+    6,
+  );
+  assert.equal(deriveScoreTotal(Number.NaN, []), 1);
 });
 
 test('tracker gives timed continuous passages an audible Live cue with half-open section bounds', () => {
@@ -593,6 +624,34 @@ test('runtime timed transport resumes Voices in phase and lets the mirror excerp
     4,
     'the two-second mirror grid must not cut its longer planned excerpt off mid-line',
   );
+  tracker.mounted.destroy();
+});
+
+test('runtime timed Tones sounds every visual lane line exactly once', async () => {
+  const tracker = mountTimedTracker();
+  await emitTrackerClick(tracker.sound, tracker.toneButton);
+  await emitTrackerClick(tracker.ui.get('.t-play'));
+  assert.equal(tracker.oscillatorStarts.length, 2, 'the opening lane pair must cue once');
+
+  const loop = [...tracker.animationFrames.values()][0];
+  assert.ok(loop, 'timed performance must have a pending animation frame');
+  for (let timestamp = 0; timestamp < 6600; timestamp += 50) {
+    tracker.setNow(timestamp);
+    loop(timestamp);
+  }
+
+  assert.equal(
+    tracker.oscillatorStarts.length,
+    score.events.length,
+    'the opening pair plus every silent visual continuation must cue once',
+  );
+  for (const lane of score.lanes) {
+    assert.equal(
+      tracker.oscillatorStarts.filter(({ frequency }) => frequency === lane.tone.f).length,
+      score.events.filter((event) => event.lane === lane.id).length,
+      `${lane.id} must receive one tone for every visual line`,
+    );
+  }
   tracker.mounted.destroy();
 });
 

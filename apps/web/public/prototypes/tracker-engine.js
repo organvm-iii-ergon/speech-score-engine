@@ -565,6 +565,9 @@
     let timedLaneOffsets = new Map();
     let timedPassageDuration = 0;
     let timedTempoScale = 1;
+    // A timed Tones performance sounds each visible lane line once. Store event identities rather
+    // than rows: simultaneous lanes and silent continuation rows each carry their own cue.
+    let timedToneCues = new Set();
     // A new timed run invalidates any delayed Voice-mode resume from the preceding run.
     let timedRunGeneration = 0;
     let timedVoiceResumeGeneration = 0;
@@ -602,6 +605,7 @@
       timedLaneOffsets = new Map();
       timedPassageDuration = 0;
       timedTempoScale = 1;
+      timedToneCues = new Set();
     };
     const renderRow = (row) => {
       if (hereEl) hereEl.classList.remove('here');
@@ -640,6 +644,17 @@
         cue.ev.el.classList.toggle('spoken', inSection && seconds >= cue.end);
         if (isNow) nowWords.push(cue.ev.el);
       }
+      playTimedTones(
+        timedCues.filter((cue) => {
+          const seconds = elapsed + (timedLaneOffsets.get(cue.ev.lane) || 0);
+          return (
+            cue.ev.tick >= sectionStart &&
+            cue.ev.tick < sectionEnd &&
+            seconds >= cue.start &&
+            seconds < cue.end
+          );
+        }),
+      );
       if (nowWords.length) {
         const activeRows = timedCues
           .filter((cue) => nowWords.includes(cue.ev.el))
@@ -649,6 +664,15 @@
           currentRow = activeRow;
           renderRow(activeRow);
         }
+      }
+    };
+    const playTimedTones = (cues) => {
+      if (soundMode !== 'tone') return;
+      if (!ensureCtx() || !ctx) return;
+      for (const cue of cues) {
+        if (timedToneCues.has(cue.ev)) continue;
+        timedToneCues.add(cue.ev);
+        if (laneIsAudible(cue.ev.lane)) tone(cue.ev.lane, ctx.currentTime);
       }
     };
     const planTimedPassage = (sectionStart, sectionEnd, transportRate = 1) => {
@@ -731,7 +755,22 @@
       timedPassageDuration = Math.max(gridDuration, excerptDuration);
       timedStartTs = performance.now() + 15;
       hasStruckCurrent = true;
-      voice(plan.passageEvents);
+      if (soundMode === 'tone') {
+        // The passage source triggers are also the first visible cues. Mark them before sounding so
+        // the first animation frame does not duplicate either opening lane tone.
+        const initialCues = CH.map(
+          (lane) =>
+            timedCues
+              .filter(
+                (cue) =>
+                  cue.ev.lane === lane && cue.ev.tick >= sectionStart && cue.ev.tick < sectionEnd,
+              )
+              .sort((a, b) => a.ev.tick - b.ev.tick)[0],
+        ).filter(Boolean);
+        playTimedTones(initialCues);
+      } else {
+        voice(plan.passageEvents);
+      }
       return true;
     };
     const timedPassageOffset = () =>

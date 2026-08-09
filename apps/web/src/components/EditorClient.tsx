@@ -2,6 +2,7 @@
 
 import { ClipWaveform } from '@/components/ClipWaveform';
 import { loadScript, loadStylesheet } from '@/lib/loadScript';
+import { deriveScoreTotal, renameContinuousPassageLine } from '@/lib/scoreEditing';
 import { ENGINE_SCRIPT, ENGINE_STYLES, SCORE_SCRIPTS } from '@/lib/scoreScripts';
 import { VOICE_CATALOG } from '@/lib/voiceCatalog';
 import type { ClipTiming, Lane, Score } from '@/types/sse';
@@ -158,7 +159,7 @@ export function EditorClient() {
     );
     seq.current = sc.events.length;
     setTempo(sc.tempo ?? 3);
-    setTotal(sc.total);
+    setTotal(deriveScoreTotal(sc.total, sc.events));
     setTitle(sc.title);
     setScoreId(sc.id);
     setSelected(null);
@@ -303,15 +304,7 @@ export function EditorClient() {
   };
   const renameClip = (text: string) => {
     if (!selected) return;
-    setEvents((prev) =>
-      prev.map((event) => {
-        if (event.id !== selected) return event;
-        const renamed = { ...event, text, speechText: undefined };
-        // A continuous-passage trigger's speechText names the generated full-passage clip.
-        // Once its visible text is edited that clip is stale, so fall back to the edited text.
-        return renamed;
-      }),
-    );
+    setEvents((prev) => renameContinuousPassageLine(prev, selected, text));
   };
 
   const addLane = () => {
@@ -351,7 +344,6 @@ export function EditorClient() {
   // Emits the timing model plus a rounded `row` so any un-upgraded consumer still positions roughly;
   // `start` is written only when it differs from that row (i.e. the clip is off the integer grid).
   const toScore = useCallback((): Score => {
-    const maxEnd = events.reduce((m, e) => Math.max(m, e.start + e.beats), 0);
     const id = slug(scoreId || title);
     return {
       id,
@@ -360,7 +352,7 @@ export function EditorClient() {
       tempo,
       lanes,
       sections: {},
-      total: Math.max(total, Math.ceil(maxEnd) + 1),
+      total: deriveScoreTotal(total, events),
       events: events
         .slice()
         .sort((a, b) => a.start - b.start)
