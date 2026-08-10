@@ -483,6 +483,37 @@
   opacity: 0.62;
   transform: scale(1.04);
 }
+.sse[data-artwork] .artwork-feather {
+  display: block;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: auto;
+  height: calc(100% + 18px);
+  max-width: min(58vw, 38rem);
+  object-fit: contain;
+  filter: blur(18px) saturate(1.12);
+  opacity: 0.78;
+  transform: translate(-50%, -50%) scale(1.025);
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(0, 0, 0, 0.32) 6%,
+    #000 16%,
+    #000 84%,
+    rgba(0, 0, 0, 0.32) 94%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(0, 0, 0, 0.32) 6%,
+    #000 16%,
+    #000 84%,
+    rgba(0, 0, 0, 0.32) 94%,
+    transparent 100%
+  );
+}
 .sse[data-artwork] .artwork-original {
   display: block;
   position: absolute;
@@ -494,6 +525,24 @@
   object-fit: contain;
   opacity: 1;
   transform: translate(-50%, -50%);
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(0, 0, 0, 0.32) 6%,
+    #000 16%,
+    #000 84%,
+    rgba(0, 0, 0, 0.32) 94%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(0, 0, 0, 0.32) 6%,
+    #000 16%,
+    #000 84%,
+    rgba(0, 0, 0, 0.32) 94%,
+    transparent 100%
+  );
 }
 .sse[data-artwork] .viewport::before,
 .sse[data-artwork] .viewport::after {

@@ -743,9 +743,12 @@ test('every score uses the same artwork, route, treatment, and transport machine
   assert.match(engine, /artworkMeta\.image/);
   assert.match(engine, /artwork-original/);
   assert.match(engine, /artwork-bleed/);
+  assert.match(engine, /artwork-feather/);
   assert.match(styles, /\.sse\[data-artwork\]/);
   assert.match(styles, /\.sse\[data-artwork\] \.artwork-panel/);
   assert.match(styles, /filter: blur\(30px\) saturate\(1\.12\)/);
+  assert.match(styles, /-webkit-mask-image: linear-gradient\(/);
+  assert.match(styles, /mask-image: linear-gradient\(/);
   assert.match(styles, /\.sse\[data-artwork\] \.cell\.line-active/);
   assert.match(styles, /grid-template-columns: var\(--lanes\)/);
   assert.match(styles, /align-right\.line-active/);
