@@ -31,6 +31,8 @@ const SCORE_RELATIVE = `apps/web/public/prototypes/scores/${SCORE_ID}.js`;
 const VOICE_RELATIVE = `apps/web/public/prototypes/voices/${SCORE_ID}.js`;
 const SCORE_FILE = path.join(ROOT, SCORE_RELATIVE);
 const VOICE_FILE = path.join(ROOT, VOICE_RELATIVE);
+const ARTWORK_RELATIVE = `apps/web/public/prototypes/artwork/${SCORE_ID}-painting.png`;
+const ARTWORK_FILE = path.join(ROOT, ARTWORK_RELATIVE);
 
 const EXPECTED_PAIRS = [
   ['i love', 'you'],
@@ -241,9 +243,11 @@ function fakeElement(tagName = 'div') {
 
 function mountTimedTracker({
   deferDecode = false,
-  voiceConfig = score.defaultVoiceConfiguration,
+  voiceConfig,
   missingClipKey = null,
+  scoreOverride = score,
 } = {}) {
+  const activeVoiceConfig = voiceConfig ?? scoreOverride.defaultVoiceConfiguration;
   let now = 0;
   let nextAnimationFrame = 1;
   const animationFrames = new Map();
@@ -348,6 +352,7 @@ function mountTimedTracker({
   createUi('.t-track').scrollHeight = 1000;
   createUi('.t-viewport').clientHeight = 260;
   createUi('.t-heads');
+  createUi('.t-artwork');
   createUi('.t-scores');
   createUi('.t-sections');
   createUi('.t-voice-config-row');
@@ -369,12 +374,12 @@ function mountTimedTracker({
   cueButton.dataset.mode = 'cue';
   mode.children.push(clockButton, cueButton);
   createUi('.t-countin', 'button');
-  createUi('.t-tempo').value = String(score.tempo);
+  createUi('.t-tempo').value = String(scoreOverride.tempo);
   createUi('.t-count');
   createUi('.t-hint');
 
-  const runtimeScore = JSON.parse(JSON.stringify(score));
-  const selectedPack = selectVoicePackConfiguration(score, voicePack, voiceConfig);
+  const runtimeScore = JSON.parse(JSON.stringify(scoreOverride));
+  const selectedPack = selectVoicePackConfiguration(scoreOverride, voicePack, activeVoiceConfig);
   const runtimeTimings = JSON.parse(JSON.stringify(selectedPack.timings));
   const clips = Object.fromEntries(Object.keys(runtimeTimings).map((key) => [key, 'AA==']));
   if (missingClipKey) delete clips[missingClipKey];
@@ -422,7 +427,7 @@ function mountTimedTracker({
     score: runtimeScore,
     clips,
     timings: runtimeTimings,
-    voiceConfig,
+    voiceConfig: activeVoiceConfig,
     scores: [runtimeScore],
     onVoiceConfig: (id) => selectedVoiceConfigurations.push(id),
   });
@@ -433,6 +438,7 @@ function mountTimedTracker({
     oscillatorStarts,
     panners,
     pendingDecodes,
+    root,
     setNow: (value) => {
       now = value;
     },
@@ -440,6 +446,7 @@ function mountTimedTracker({
     starts,
     selectedVoiceConfigurations,
     speechUtterances,
+    artwork: ui.get('.t-artwork'),
     toneButton,
     ui,
     cueButton,
@@ -648,6 +655,68 @@ test('library, tracker, editor, and standalone source all register the score lan
   assert.match(tracker, /params\.set\('voiceConfig', nextId\)/);
   assert.match(standalone, /params\.get\('voiceConfig'\)/);
   assert.match(standalone, /voicePack: voices/);
+});
+
+test('the live Lady Macbeth route has score-aware artwork while other scores keep the dark shell', () => {
+  const engine = fs.readFileSync(
+    path.join(ROOT, 'apps/web/public/prototypes/tracker-engine.js'),
+    'utf8',
+  );
+  const styles = fs.readFileSync(path.join(ROOT, 'apps/web/public/prototypes/tracker.css'), 'utf8');
+  const dedicatedRoute = fs.readFileSync(
+    path.join(ROOT, 'apps/web/src/app/scores/lady-macbeth-macbeth/page.tsx'),
+    'utf8',
+  );
+  const library = fs.readFileSync(
+    path.join(ROOT, 'apps/web/src/components/LibraryClient.tsx'),
+    'utf8',
+  );
+  const standaloneBuilder = fs.readFileSync(path.join(ROOT, 'tools/build-standalone.mjs'), 'utf8');
+
+  assert.ok(fs.existsSync(ARTWORK_FILE), 'the public painting asset must be tracked');
+  assert.ok(
+    fs.statSync(ARTWORK_FILE).size > 100_000,
+    'the public asset must be full-resolution crop data',
+  );
+  assert.deepEqual(
+    fs.readFileSync(ARTWORK_FILE).subarray(0, 8),
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+  );
+  assert.match(engine, /root\.dataset\.score = SC\.id/);
+  assert.match(engine, /artwork\/lady-macbeth-macbeth-painting\.png/);
+  assert.match(engine, /artwork-original/);
+  assert.match(engine, /artwork-bleed/);
+  assert.match(styles, /\.sse\[data-score="lady-macbeth-macbeth"\]/);
+  assert.match(styles, /\.sse\[data-score="lady-macbeth-macbeth"\] \.artwork-panel/);
+  assert.match(styles, /filter: blur\(30px\) saturate\(1\.12\)/);
+  assert.match(styles, /\.sse\[data-score="lady-macbeth-macbeth"\] \.word\.now/);
+  assert.match(dedicatedRoute, /defaultScoreId="lady-macbeth-macbeth"/);
+  assert.match(dedicatedRoute, /defaultVoiceConfig="separated"/);
+  assert.match(library, /'\/scores\/lady-macbeth-macbeth\/'/);
+  assert.match(library, /`\/tracker\?score=\$\{encodeURIComponent\(c\.score\.id\)\}`/);
+  assert.match(standaloneBuilder, /ARTWORK_PUBLIC_PATH/);
+  assert.match(standaloneBuilder, /data:\$\{mimeType\(file\)\};base64/);
+
+  const lady = mountTimedTracker();
+  assert.equal(lady.root.dataset.score, SCORE_ID);
+  assert.equal(lady.artwork.hidden, false);
+  assert.match(lady.artwork.innerHTML, /data-sse-artwork/);
+  assert.match(lady.artwork.innerHTML, /artwork-original/);
+  assert.match(lady.artwork.innerHTML, /@amaanjahangir/);
+  lady.mounted.destroy();
+
+  const other = mountTimedTracker({
+    scoreOverride: {
+      ...score,
+      id: 'philip-glass',
+      voiceConfigurations: undefined,
+      defaultVoiceConfiguration: undefined,
+    },
+  });
+  assert.equal(other.root.dataset.score, 'philip-glass');
+  assert.equal(other.artwork.hidden, true);
+  assert.equal(other.artwork.innerHTML, '');
+  other.mounted.destroy();
 });
 
 test('editing a continuous-passage continuation rebuilds its source passage in visual order', () => {

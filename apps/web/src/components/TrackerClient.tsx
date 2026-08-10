@@ -10,14 +10,20 @@ import { useEffect, useRef } from 'react';
 // score's voice pack is loaded lazily afterwards. Same files the standalone HTML uses.
 const CORE_SCRIPTS = [...SCORE_SCRIPTS, ENGINE_SCRIPT];
 
-function pickId(scores: Record<string, Score>): string | undefined {
+interface TrackerClientProps {
+  defaultScoreId?: string;
+  defaultVoiceConfig?: string;
+}
+
+function pickId(scores: Record<string, Score>, defaultScoreId?: string): string | undefined {
   const wanted = new URLSearchParams(window.location.search).get('score');
   if (wanted && scores[wanted]) return wanted;
+  if (defaultScoreId && scores[defaultScoreId]) return defaultScoreId;
   if (scores['philip-glass']) return 'philip-glass';
   return Object.keys(scores)[0];
 }
 
-export function TrackerClient() {
+export function TrackerClient({ defaultScoreId, defaultVoiceConfig }: TrackerClientProps = {}) {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -30,14 +36,15 @@ export function TrackerClient() {
       const engine = window.SSEEngine;
       const el = ref.current;
       if (cancelled || !scores || !engine || !el) return;
-      const id = pickId(scores);
+      const id = pickId(scores, defaultScoreId);
       if (!id) return;
       const score = scores[id];
       if (!score) return;
       await loadScript(`/prototypes/voices/${id}.js`);
       if (cancelled) return;
       const voicePack = window.SSE_VOICES?.[id];
-      const requestedVoiceConfig = new URLSearchParams(window.location.search).get('voiceConfig');
+      const requestedVoiceConfig =
+        new URLSearchParams(window.location.search).get('voiceConfig') || defaultVoiceConfig;
       const voiceConfig = resolveVoiceConfigurationId(score, requestedVoiceConfig);
       handle = engine.mount(el, {
         score,
@@ -68,7 +75,7 @@ export function TrackerClient() {
       cancelled = true;
       if (handle) handle.destroy();
     };
-  }, []);
+  }, [defaultScoreId, defaultVoiceConfig]);
 
   return <div ref={ref} style={{ width: '100%', height: '100%' }} />;
 }

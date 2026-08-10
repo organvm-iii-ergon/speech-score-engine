@@ -19,6 +19,8 @@ const PROTO = path.join(ROOT, 'apps/web/public/prototypes');
 const SHELL = path.join(PROTO, 'philip-glass-tracker.html');
 const OUT_DIR = path.join(ROOT, 'dist');
 const OUT = path.join(OUT_DIR, 'speech-score.html');
+const ARTWORK_RELATIVE = 'artwork/lady-macbeth-macbeth-painting.png';
+const ARTWORK_PUBLIC_PATH = `/prototypes/${ARTWORK_RELATIVE}`;
 
 const readLocal = (href) => {
   const file = path.join(PROTO, href);
@@ -29,6 +31,24 @@ const readLocal = (href) => {
 // A stray "</script>" inside inlined JS would close the wrapping tag early — neutralize it. Harmless
 // to the JS (the sequence never legitimately appears in these data/engine files) and standard.
 const safeJs = (src) => src.replace(/<\/script>/gi, '<\\/script>');
+
+const mimeType = (file) => {
+  const extension = path.extname(file).toLowerCase();
+  if (extension === '.png') return 'image/png';
+  if (extension === '.jpg' || extension === '.jpeg') return 'image/jpeg';
+  if (extension === '.webp') return 'image/webp';
+  throw new Error(`refusing to inline unsupported image type: ${file}`);
+};
+
+const inlineImage = (publicPath, relativePath) => {
+  const file = path.join(PROTO, relativePath);
+  if (!file.startsWith(PROTO)) throw new Error(`refusing to inline outside prototypes/: ${relativePath}`);
+  if (!fs.existsSync(file)) throw new Error(`missing standalone image: ${file}`);
+  const dataUri = `data:${mimeType(file)};base64,${fs.readFileSync(file).toString('base64')}`;
+  if (!html.includes(publicPath)) throw new Error(`standalone image path not found: ${publicPath}`);
+  html = html.replaceAll(publicPath, dataUri);
+  inlined.push(relativePath);
+};
 
 let html = fs.readFileSync(SHELL, 'utf8');
 const inlined = [];
@@ -47,6 +67,8 @@ html = html.replace(/<script\b[^>]*\bsrc=["']([^"']+)["'][^>]*>\s*<\/script>/gi,
   inlined.push(src);
   return `<script>\n${safeJs(readLocal(src))}\n</script>`;
 });
+
+inlineImage(ARTWORK_PUBLIC_PATH, ARTWORK_RELATIVE);
 
 const banner = `<!-- BUILT — single-file bundle of the speech-score tracker. Do not edit by hand.
      Source: apps/web/public/prototypes/ (${inlined.length} files inlined). Rebuild: node tools/build-standalone.mjs -->\n`;

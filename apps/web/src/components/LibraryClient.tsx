@@ -119,55 +119,65 @@ export function LibraryClient() {
           gap: '1.1rem',
         }}
       >
-        {cards?.map((c) => (
-          <a
-            key={c.score.id}
-            href={`/tracker?score=${encodeURIComponent(c.score.id)}`}
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '0.55rem',
-              background: C.panel,
-              border: `1px solid ${C.rule}`,
-              borderRadius: '10px',
-              padding: '1.15rem 1.25rem 1.3rem',
-              textDecoration: 'none',
-              color: 'inherit',
-            }}
-          >
-            <div style={{ fontSize: '1.25rem', color: C.accent, lineHeight: 1.2 }}>
-              {c.score.title}
-            </div>
-            {c.score.byline && (
-              <div style={{ fontSize: '0.85rem', color: C.muted, fontStyle: 'italic' }}>
-                {c.score.byline}
-              </div>
-            )}
-            {c.score.caption && (
-              <div style={{ fontSize: '0.82rem', color: C.muted, lineHeight: 1.5, flex: 1 }}>
-                {c.score.caption}
-              </div>
-            )}
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginTop: '0.3rem' }}>
-              <span style={pill(C.muted)}>
-                {c.voices} {c.voices === 1 ? 'voice' : 'voices'}
-              </span>
-              <span style={pill(C.muted)}>{c.lines} lines</span>
-              {c.human > 0 && <span style={pill(C.accent)}>human + AI</span>}
-              {c.chorus && <span style={pill(C.muted)}>chorus</span>}
-            </div>
-            <div
+        {cards?.map((c) => {
+          // Keep the original tracker query URL as a stable share alias while giving Lady Macbeth
+          // a canonical, descriptive route of its own.
+          const trackerHref = `/tracker?score=${encodeURIComponent(c.score.id)}`;
+          const href =
+            c.score.id === 'lady-macbeth-macbeth' ? '/scores/lady-macbeth-macbeth/' : trackerHref;
+          return (
+            <a
+              key={c.score.id}
+              href={href}
+              data-tracker-alias={c.score.id === 'lady-macbeth-macbeth' ? trackerHref : undefined}
               style={{
-                fontFamily: 'system-ui, sans-serif',
-                fontSize: '0.8rem',
-                color: C.accent,
-                marginTop: '0.35rem',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '0.55rem',
+                background: C.panel,
+                border: `1px solid ${C.rule}`,
+                borderRadius: '10px',
+                padding: '1.15rem 1.25rem 1.3rem',
+                textDecoration: 'none',
+                color: 'inherit',
               }}
             >
-              ▶ Open in tracker →
-            </div>
-          </a>
-        ))}
+              <div style={{ fontSize: '1.25rem', color: C.accent, lineHeight: 1.2 }}>
+                {c.score.title}
+              </div>
+              {c.score.byline && (
+                <div style={{ fontSize: '0.85rem', color: C.muted, fontStyle: 'italic' }}>
+                  {c.score.byline}
+                </div>
+              )}
+              {c.score.caption && (
+                <div style={{ fontSize: '0.82rem', color: C.muted, lineHeight: 1.5, flex: 1 }}>
+                  {c.score.caption}
+                </div>
+              )}
+              <div
+                style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginTop: '0.3rem' }}
+              >
+                <span style={pill(C.muted)}>
+                  {c.voices} {c.voices === 1 ? 'voice' : 'voices'}
+                </span>
+                <span style={pill(C.muted)}>{c.lines} lines</span>
+                {c.human > 0 && <span style={pill(C.accent)}>human + AI</span>}
+                {c.chorus && <span style={pill(C.muted)}>chorus</span>}
+              </div>
+              <div
+                style={{
+                  fontFamily: 'system-ui, sans-serif',
+                  fontSize: '0.8rem',
+                  color: C.accent,
+                  marginTop: '0.35rem',
+                }}
+              >
+                ▶ Open in tracker →
+              </div>
+            </a>
+          );
+        })}
       </div>
     </main>
   );

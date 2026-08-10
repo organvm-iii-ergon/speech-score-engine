@@ -17,7 +17,10 @@
     '  <div class="by t-byline"></div>',
     '</div>',
     '<div class="heads t-heads"></div>',
-    '<div class="viewport t-viewport"><div class="track t-track"></div></div>',
+    '<div class="viewport t-viewport">',
+    '  <div class="artwork-panel t-artwork" hidden></div>',
+    '  <div class="track t-track"></div>',
+    '</div>',
     '<div class="caption t-caption"></div>',
     '<div class="transport">',
     '  <div class="trow"><div class="seg t-scores"></div></div>',
@@ -88,8 +91,27 @@
       });
 
     root.classList.add('sse');
+    root.dataset.score = SC.id;
     root.innerHTML = TEMPLATE;
     const q = (sel) => root.querySelector(sel);
+
+    const artwork = q('.t-artwork');
+    if (artwork) {
+      const hasArtwork = SC.id === 'lady-macbeth-macbeth';
+      artwork.hidden = !hasArtwork;
+      artwork.innerHTML = hasArtwork
+        ? [
+            '<img class="artwork-bleed" data-sse-artwork',
+            '  src="/prototypes/artwork/lady-macbeth-macbeth-painting.png"',
+            '  alt="" aria-hidden="true" />',
+            '<img class="artwork-original" data-sse-artwork',
+            '  src="/prototypes/artwork/lady-macbeth-macbeth-painting.png"',
+            '  alt="Painted Skeleton with Poetic Text by Amaan Jahangir" />',
+            '<a class="artwork-credit" href="https://linktr.ee/amaanjahangir"',
+            '  target="_blank" rel="noreferrer">Artwork @amaanjahangir</a>',
+          ].join('\n')
+        : '';
+    }
 
     // ---- derive everything from the score ----
     const LANES = SC.lanes;
@@ -1482,6 +1504,7 @@
         stopSamples();
         if (ctx && ctx.state !== 'closed') ctx.close();
         root.innerHTML = '';
+        delete root.dataset.score;
         root.classList.remove('sse');
       },
     };
