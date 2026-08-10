@@ -13,6 +13,7 @@ const CORE_SCRIPTS = [...SCORE_SCRIPTS, ENGINE_SCRIPT];
 interface TrackerClientProps {
   defaultScoreId?: string;
   defaultVoiceConfig?: string;
+  defaultPerformance?: 'tracker' | 'free-time';
 }
 
 function pickId(scores: Record<string, Score>, defaultScoreId?: string): string | undefined {
@@ -23,7 +24,11 @@ function pickId(scores: Record<string, Score>, defaultScoreId?: string): string 
   return Object.keys(scores)[0];
 }
 
-export function TrackerClient({ defaultScoreId, defaultVoiceConfig }: TrackerClientProps = {}) {
+export function TrackerClient({
+  defaultScoreId,
+  defaultVoiceConfig,
+  defaultPerformance = 'tracker',
+}: TrackerClientProps = {}) {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -46,22 +51,30 @@ export function TrackerClient({ defaultScoreId, defaultVoiceConfig }: TrackerCli
       const requestedVoiceConfig =
         new URLSearchParams(window.location.search).get('voiceConfig') || defaultVoiceConfig;
       const voiceConfig = resolveVoiceConfigurationId(score, requestedVoiceConfig);
+      const performance =
+        new URLSearchParams(window.location.search).get('performance') || defaultPerformance;
       handle = engine.mount(el, {
         score,
         voicePack: voicePack ?? null,
         voiceConfig,
+        performance,
         clips: voicePack?.clips ?? null,
         timings: voicePack?.timings ?? null,
         scores: Object.values(scores),
         onPick: (nextId: string) => {
           const params = new URLSearchParams(window.location.search);
           params.set('score', nextId);
-          params.delete('voiceConfig');
           window.location.search = params.toString();
         },
         onVoiceConfig: (nextId: string) => {
           const params = new URLSearchParams(window.location.search);
           params.set('voiceConfig', nextId);
+          window.location.search = params.toString();
+        },
+        onPerformance: (nextMode: 'tracker' | 'free-time') => {
+          const params = new URLSearchParams(window.location.search);
+          if (nextMode === 'tracker') params.delete('performance');
+          else params.set('performance', nextMode);
           window.location.search = params.toString();
         },
       });
@@ -75,7 +88,7 @@ export function TrackerClient({ defaultScoreId, defaultVoiceConfig }: TrackerCli
       cancelled = true;
       if (handle) handle.destroy();
     };
-  }, [defaultScoreId, defaultVoiceConfig]);
+  }, [defaultScoreId, defaultVoiceConfig, defaultPerformance]);
 
   return <div ref={ref} style={{ width: '100%', height: '100%' }} />;
 }

@@ -3,6 +3,7 @@
 // loaded at runtime via <script> injection, so they surface on `window` rather than as imports.
 
 export type Performer = 'ai' | 'human';
+export type PerformanceMode = 'tracker' | 'free-time';
 
 export interface Lane {
   id: string;
@@ -116,9 +117,11 @@ export interface MountOptions {
   timings?: Record<string, ClipTiming> | null;
   voicePack?: VoicePack | null;
   voiceConfig?: string | null;
+  performance?: string | null;
   scores: Score[];
   onPick?: (id: string) => void;
   onVoiceConfig?: (id: string) => void;
+  onPerformance?: (mode: PerformanceMode) => void;
 }
 
 export interface TrackerHandle {

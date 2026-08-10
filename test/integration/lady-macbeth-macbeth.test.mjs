@@ -240,7 +240,9 @@ function fakeElement(tagName = 'div') {
       return listeners.get(type)?.(event);
     },
     closest(selector) {
-      return selector === 'button' && this.tagName === 'button' ? this : null;
+      if (selector === 'button' && this.tagName === 'button') return this;
+      if (selector === '.h' && this.className.split(/\s+/).includes('h')) return this;
+      return null;
     },
     connect() {
       return this;
@@ -252,9 +254,12 @@ function fakeElement(tagName = 'div') {
 function mountTimedTracker({
   deferDecode = false,
   voiceConfig,
+  performanceMode,
   missingClipKey = null,
   audioContextState = 'running',
   scoreOverride = score,
+  voicePackOverride = voicePack,
+  instantTimers = false,
 } = {}) {
   const activeVoiceConfig = voiceConfig ?? scoreOverride.defaultVoiceConfiguration;
   let now = 0;
@@ -263,6 +268,7 @@ function mountTimedTracker({
   const oscillatorStarts = [];
   const panners = [];
   const selectedVoiceConfigurations = [];
+  const selectedPerformanceModes = [];
   const speechUtterances = [];
   const starts = [];
   const pendingDecodes = [];
@@ -369,14 +375,16 @@ function mountTimedTracker({
   createUi('.t-caption');
   createUi('.t-track').scrollHeight = 1000;
   createUi('.t-viewport').clientHeight = 260;
-  createUi('.t-heads');
+  const heads = createUi('.t-heads');
   createUi('.t-artwork');
   createUi('.t-scores');
-  createUi('.t-sections');
+  const sections = createUi('.t-sections');
+  createUi('.t-performance-row');
+  const performanceSelect = createUi('.t-performance', 'select');
   createUi('.t-voice-config-row');
   const voiceConfigSelect = createUi('.t-voice-config', 'select');
-  createUi('.t-play', 'button');
-  createUi('.t-restart', 'button');
+  const playButton = createUi('.t-play', 'button');
+  const restartButton = createUi('.t-restart', 'button');
   const sound = createUi('.t-sound');
   const voiceButton = fakeElement('button');
   voiceButton.dataset.m = 'voice';
@@ -391,19 +399,27 @@ function mountTimedTracker({
   const cueButton = fakeElement('button');
   cueButton.dataset.mode = 'cue';
   mode.children.push(clockButton, cueButton);
-  createUi('.t-countin', 'button');
+  const countinButton = createUi('.t-countin', 'button');
   createUi('.t-tempo').value = String(scoreOverride.tempo);
   createUi('.t-count');
   createUi('.t-hint');
 
   const runtimeScore = JSON.parse(JSON.stringify(scoreOverride));
-  const selectedPack = selectVoicePackConfiguration(scoreOverride, voicePack, activeVoiceConfig);
+  const selectedPack = selectVoicePackConfiguration(
+    scoreOverride,
+    voicePackOverride,
+    activeVoiceConfig,
+  );
   const runtimeTimings = JSON.parse(JSON.stringify(selectedPack.timings));
   const clips = Object.fromEntries(Object.keys(runtimeTimings).map((key) => [key, 'AA==']));
   if (missingClipKey) delete clips[missingClipKey];
   const runtimeVoicePack = scoreOverride.voiceConfigurations
-    ? JSON.parse(JSON.stringify(voicePack))
+    ? JSON.parse(JSON.stringify(voicePackOverride))
     : { clips, timings: runtimeTimings };
+  for (const key of Object.keys(runtimeVoicePack.clips || {})) runtimeVoicePack.clips[key] = 'AA==';
+  for (const configuration of Object.values(runtimeVoicePack.configurations || {})) {
+    for (const key of Object.keys(configuration.clips || {})) configuration.clips[key] = 'AA==';
+  }
   if (missingClipKey) {
     delete runtimeVoicePack.clips?.[missingClipKey];
     for (const configuration of Object.values(runtimeVoicePack.configurations || {})) {
@@ -424,7 +440,12 @@ function mountTimedTracker({
     speechSynthesis,
     addEventListener: () => {},
     removeEventListener: () => {},
-    setTimeout,
+    setTimeout: instantTimers
+      ? (callback) => {
+          queueMicrotask(callback);
+          return 1;
+        }
+      : setTimeout,
   };
   const sandbox = {
     window,
@@ -439,7 +460,7 @@ function mountTimedTracker({
     },
     cancelAnimationFrame: (id) => animationFrames.delete(id),
     atob: (value) => Buffer.from(value, 'base64').toString('binary'),
-    clearTimeout,
+    clearTimeout: instantTimers ? () => {} : clearTimeout,
     SpeechSynthesisUtterance: class {
       constructor(text) {
         this.text = text;
@@ -456,8 +477,10 @@ function mountTimedTracker({
     clips,
     timings: runtimeTimings,
     voiceConfig: activeVoiceConfig,
+    performance: performanceMode,
     scores: [runtimeScore],
     onVoiceConfig: (id) => selectedVoiceConfigurations.push(id),
+    onPerformance: (mode) => selectedPerformanceModes.push(mode),
   });
 
   return {
@@ -466,6 +489,9 @@ function mountTimedTracker({
     oscillatorStarts,
     panners,
     pendingDecodes,
+    performanceSelect,
+    playButton,
+    restartButton,
     root,
     setNow: (value) => {
       now = value;
@@ -473,11 +499,15 @@ function mountTimedTracker({
     sound,
     starts,
     selectedVoiceConfigurations,
+    selectedPerformanceModes,
     speechUtterances,
     resumeCalls,
     artwork: ui.get('.t-artwork'),
     events: runtimeScore.events,
     tempo: ui.get('.t-tempo'),
+    countinButton,
+    heads,
+    sections,
     toneButton,
     ui,
     cueButton,
@@ -511,6 +541,104 @@ const allScores = Object.fromEntries(
     evaluateRegistration(file, 'SSE_SCORES', id),
   ]),
 );
+const allVoicePacks = Object.fromEntries(
+  Object.keys(SCORE_ARTWORKS).map((id) => [
+    id,
+    evaluateRegistration(
+      path.join(ROOT, `apps/web/public/prototypes/voices/${id}.js`),
+      'SSE_VOICES',
+      id,
+    ),
+  ]),
+);
+
+function syntheticVoicePack(candidate, durations = {}) {
+  const clips = {};
+  const timings = {};
+  for (const event of candidate.events) {
+    const lane = candidate.lanes.find((item) => item.id === event.lane);
+    if (!lane || lane.performer === 'human' || event.silent) continue;
+    const text = event.speechText || event.text;
+    const key = `${event.lane}|${text}`;
+    if (clips[key]) continue;
+    const duration = durations[key] || 1;
+    clips[key] = 'AA==';
+    timings[key] = {
+      voice: lane.voice || 'test-voice',
+      rate: lane.rate || '+0%',
+      pitch: '+0Hz',
+      transposeSemitones: 0,
+      text,
+      duration,
+      words: [{ text, start: 0, end: duration }],
+    };
+  }
+  return { clips, timings };
+}
+
+function alignmentScore(laneCount, overrides = {}) {
+  const lanes = Array.from({ length: laneCount }, (_, index) => ({
+    id: `LANE_${index + 1}`,
+    name: `Lane ${index + 1}`,
+    performer: 'ai',
+    voice: 'test-voice',
+    rate: '+0%',
+    pan: laneCount === 1 ? 0 : -1 + (2 * index) / (laneCount - 1),
+    tone: { f: 220 + index * 20, type: 'sine' },
+    ...(overrides[index] ? { align: overrides[index] } : {}),
+  }));
+  return {
+    id: `alignment-${laneCount}`,
+    title: `${laneCount} lanes`,
+    tempo: 1,
+    total: 1,
+    lanes,
+    events: lanes.map((lane) => ({ row: 0, lane: lane.id, text: lane.name })),
+  };
+}
+
+const FREE_TIME_SCORE = {
+  id: 'free-time-fixture',
+  title: 'Free Time Fixture',
+  tempo: 1,
+  total: 4,
+  lanes: [
+    {
+      id: 'A',
+      name: 'A',
+      performer: 'ai',
+      voice: 'test-a',
+      rate: '+0%',
+      pan: -1,
+      tone: { f: 220, type: 'sine' },
+    },
+    {
+      id: 'B',
+      name: 'B',
+      performer: 'ai',
+      voice: 'test-b',
+      rate: '+0%',
+      pan: 1,
+      tone: { f: 440, type: 'triangle' },
+    },
+  ],
+  sections: {
+    opening: [0, 1],
+    later: [1, 4],
+  },
+  events: [
+    { row: 0, lane: 'A', text: 'a one' },
+    { row: 3, lane: 'A', text: 'a two' },
+    { row: 0, lane: 'B', text: 'b one' },
+    { row: 1, lane: 'B', text: 'b two' },
+  ],
+};
+const FREE_TIME_PACK = syntheticVoicePack(FREE_TIME_SCORE, {
+  'A|a one': 1,
+  'A|a two': 2,
+  'B|b one': 2,
+  'B|b two': 1,
+});
 
 test('score preserves the nine simultaneous left/right pairs and row-complete lane geometry', () => {
   assert.ok(score, 'score must self-register');
@@ -549,6 +677,52 @@ test('score preserves the nine simultaneous left/right pairs and row-complete la
     );
     assert.ok(pair.every((event) => !event.silent && event.speechText === undefined));
   }
+});
+
+test('one through five lanes share one center-axis alignment contract for headers and dialogue', () => {
+  const expectedAlignments = {
+    1: ['center'],
+    2: ['right', 'left'],
+    3: ['right', 'center', 'left'],
+    4: ['right', 'right', 'left', 'left'],
+    5: ['right', 'right', 'center', 'left', 'left'],
+  };
+  for (const [laneCount, expected] of Object.entries(expectedAlignments)) {
+    const candidate = alignmentScore(Number(laneCount));
+    const tracker = mountTimedTracker({
+      scoreOverride: candidate,
+      voicePackOverride: syntheticVoicePack(candidate),
+    });
+    const headerAlignments = tracker.heads.children
+      .slice(1)
+      .map((header) => header.className.match(/align-(left|right|center)/)?.[1]);
+    const dialogueAlignments = tracker.events.map(
+      (event) => event.cell.className.match(/align-(left|right|center)/)?.[1],
+    );
+    assert.deepEqual(headerAlignments, expected, `${laneCount}-lane headers`);
+    assert.deepEqual(dialogueAlignments, expected, `${laneCount}-lane dialogue`);
+    tracker.mounted.destroy();
+  }
+});
+
+test('explicit lane alignment overrides apply equally to headers and dialogue', () => {
+  const candidate = alignmentScore(5, { 0: 'left', 2: 'right', 4: 'center' });
+  const tracker = mountTimedTracker({
+    scoreOverride: candidate,
+    voicePackOverride: syntheticVoicePack(candidate),
+  });
+  const expected = ['left', 'right', 'right', 'left', 'center'];
+  assert.deepEqual(
+    tracker.heads.children
+      .slice(1)
+      .map((header) => header.className.match(/align-(left|right|center)/)?.[1]),
+    expected,
+  );
+  assert.deepEqual(
+    tracker.events.map((event) => event.cell.className.match(/align-(left|right|center)/)?.[1]),
+    expected,
+  );
+  tracker.mounted.destroy();
 });
 
 test('dramatic sections are a nonoverlapping half-open partition of all nine pairs', () => {
@@ -607,6 +781,42 @@ test('all generated voice configurations cover every rendered line and identify 
   }
 });
 
+test('every generated score pack carries measured timing for each rendered treatment', () => {
+  for (const [id, candidate] of Object.entries(allScores)) {
+    const pack = allVoicePacks[id];
+    assert.ok(pack, `${id} voice pack`);
+    const laneById = new Map(candidate.lanes.map((lane) => [lane.id, lane]));
+    const expectedKeys = [
+      ...new Set(
+        candidate.events
+          .filter(
+            (event) => !event.silent && (laneById.get(event.lane)?.performer || 'ai') !== 'human',
+          )
+          .map((event) => `${event.lane}|${event.speechText || event.text}`),
+      ),
+    ];
+    assert.equal(Object.keys(pack.clips).length, expectedKeys.length, `${id} top-level clips`);
+    assert.equal(Object.keys(pack.timings || {}).length, expectedKeys.length, `${id} timings`);
+    for (const key of expectedKeys) {
+      assert.ok(pack.clips[key], `${id} ${key} clip`);
+      assert.ok(pack.timings[key]?.duration > 0, `${id} ${key} duration`);
+      assert.ok(pack.timings[key]?.words.length > 0, `${id} ${key} word timing`);
+    }
+    for (const [configurationId, configuration] of Object.entries(pack.configurations || {})) {
+      assert.equal(
+        Object.keys(configuration.clips).length,
+        expectedKeys.length,
+        `${id} ${configurationId} clips`,
+      );
+      assert.equal(
+        Object.keys(configuration.timings).length,
+        expectedKeys.length,
+        `${id} ${configurationId} timings`,
+      );
+    }
+  }
+});
+
 test('voice configuration selection resolves URL/default choices and rejects unknown CLI choices', () => {
   assert.equal(resolveVoiceConfigurationId(score, 'natural'), 'natural');
   assert.equal(resolveVoiceConfigurationId(score, 'unknown'), 'separated');
@@ -615,6 +825,55 @@ test('voice configuration selection resolves URL/default choices and rejects unk
     () => selectVoicePackConfiguration(score, voicePack, 'unknown', { strict: true }),
     /Unknown voice configuration "unknown"/,
   );
+});
+
+test('performance mode defaults, invalid fallback, selector labels, and routing stay URL-safe', () => {
+  for (const [requested, expected] of [
+    [undefined, 'tracker'],
+    ['tracker', 'tracker'],
+    ['free-time', 'free-time'],
+    ['unknown', 'tracker'],
+  ]) {
+    const tracker = mountTimedTracker({ performanceMode: requested });
+    assert.equal(tracker.root.dataset.performance, expected);
+    assert.equal(tracker.performanceSelect.value, expected);
+    assert.deepEqual(
+      tracker.performanceSelect.children.map((option) => [option.value, option.textContent]),
+      [
+        ['tracker', 'Tracker / Ableton'],
+        ['free-time', 'Free time per lane'],
+      ],
+    );
+    tracker.mounted.destroy();
+  }
+
+  const tracker = mountTimedTracker();
+  tracker.performanceSelect.value = 'free-time';
+  tracker.performanceSelect.emit('change');
+  assert.deepEqual(tracker.selectedPerformanceModes, ['free-time']);
+  tracker.mounted.destroy();
+
+  const client = fs.readFileSync(
+    path.join(ROOT, 'apps/web/src/components/TrackerClient.tsx'),
+    'utf8',
+  );
+  const standalone = fs.readFileSync(
+    path.join(ROOT, 'apps/web/public/prototypes/philip-glass-tracker.html'),
+    'utf8',
+  );
+  assert.match(client, /get\('performance'\) \|\| defaultPerformance/);
+  assert.match(client, /if \(nextMode === 'tracker'\) params\.delete\('performance'\)/);
+  assert.match(client, /else params\.set\('performance', nextMode\)/);
+  assert.match(
+    client,
+    /onPick:[\s\S]*?params\.set\('score', nextId\);[\s\S]*?window\.location\.search = params\.toString\(\)/,
+  );
+  assert.doesNotMatch(
+    client.match(/onPick:[\s\S]*?\n\s*},/)?.[0] || '',
+    /delete\('voiceConfig'\)|delete\('performance'\)/,
+  );
+  assert.match(standalone, /params\.get\('performance'\)/);
+  assert.match(standalone, /performance: performanceMode/);
 });
 
 test('every voice configuration produces a valid row-complete schedule', () => {
@@ -633,6 +892,22 @@ test('every voice configuration produces a valid row-complete schedule', () => {
   }
   for (const lane of score.lanes) {
     assert.equal(lane.rate, '+0%', `${lane.id} must keep normal rendered word speed`);
+  }
+});
+
+test('all five voice treatments remain available and playable in both performance modes', async () => {
+  for (const performanceMode of ['tracker', 'free-time']) {
+    for (const voiceConfig of DEFAULT_VOICE_CONFIGURATION_IDS) {
+      const tracker = mountTimedTracker({ performanceMode, voiceConfig });
+      assert.equal(tracker.voiceConfigSelect.value, voiceConfig);
+      assert.deepEqual(
+        tracker.voiceConfigSelect.children.map((option) => option.value),
+        DEFAULT_VOICE_CONFIGURATION_IDS,
+      );
+      await emitTrackerClick(tracker.playButton);
+      assert.equal(tracker.starts.length, score.events.length);
+      tracker.mounted.destroy();
+    }
   }
 });
 
@@ -751,9 +1026,9 @@ test('every score uses the same artwork, route, treatment, and transport machine
   assert.match(styles, /mask-image: linear-gradient\(/);
   assert.match(styles, /\.sse\[data-artwork\] \.cell\.line-active/);
   assert.match(styles, /grid-template-columns: var\(--lanes\)/);
-  assert.match(styles, /align-right\.line-active/);
-  assert.match(styles, /align-left\.line-active/);
-  assert.match(styles, /width: calc\(100% - 3px\)/);
+  assert.match(styles, /\.cell\.line-active[\s\S]*?width: calc\(100% - 4px\)/);
+  assert.match(styles, /\.cell\.line-active[\s\S]*?margin-inline: 2px/);
+  assert.doesNotMatch(styles, /align-(?:right|left)\.line-active/);
   assert.match(scoreRoute, /generateStaticParams/);
   for (const id of Object.keys(SCORE_ARTWORKS)) assert.match(scoreRoute, new RegExp(id));
   assert.match(scoreRoute, /defaultVoiceConfig="separated"/);
@@ -924,7 +1199,11 @@ test('tracker keeps continuous-passage cues and derives row-complete tracker bou
   assert.match(engine, /if \(rowCompletePlan && timedStartTs !== null\)/);
   assert.match(engine, /const playTimedCueRow = \(row\) =>/);
   assert.match(engine, /if \(timedCues && cue\)[\s\S]*?playTimedCueRow\(row\);[\s\S]*?return;/);
-  assert.match(engine, /timedCues \|\| rowCompletePlan \? r < e : r <= e/);
+  assert.match(
+    engine,
+    /const halfOpen = PERFORMANCE === 'free-time' \|\| timedCues \|\| rowCompletePlan/,
+  );
+  assert.match(engine, /halfOpen \? r < e : r <= e/);
   assert.match(engine, /TIMINGS\[`\$\{lane\}\|\$\{sourceEvent\.speechText\}`\]/);
   assert.doesNotMatch(engine, /Object\.entries\(TIMINGS\)\.find/);
   assert.match(
@@ -1003,6 +1282,144 @@ test('Tones to Voices resumes the active timed passage at its live source offset
     engine,
     /previousSoundMode === 'tone' \|\| activeSources\.size === 0[\s\S]*?void resumeTimedVoices\(\)/,
   );
+});
+
+test('Free Time starts lanes together, then follows measured durations and lane-local rests', async () => {
+  const tracker = mountTimedTracker({
+    performanceMode: 'free-time',
+    scoreOverride: FREE_TIME_SCORE,
+    voicePackOverride: FREE_TIME_PACK,
+  });
+  await emitTrackerClick(tracker.playButton);
+  assert.equal(tracker.root.dataset.performance, 'free-time');
+  assert.equal(tracker.playButton.textContent, '❚❚ Pause');
+  assert.equal(tracker.starts.length, 4);
+  assert.equal(tracker.starts[0].when, tracker.starts[2].when, 'both lanes launch together');
+  assert.ok(Math.abs(tracker.starts[0].when - 0.015) < 1e-6);
+  assert.ok(Math.abs(tracker.starts[1].when - 3.015) < 1e-6, 'A keeps its two-beat rest');
+  assert.ok(Math.abs(tracker.starts[3].when - 2.015) < 1e-6, 'B advances after its own clip');
+  assert.deepEqual(
+    tracker.starts.map(({ duration }) => duration),
+    [1, 2, 2, 1],
+    'source windows use measured clip durations',
+  );
+
+  const loop = [...tracker.animationFrames.values()][0];
+  tracker.setNow(2015);
+  loop(2015);
+  assert.equal(tracker.events[0].cell.classList.contains('line-active'), false);
+  assert.equal(tracker.events[1].cell.classList.contains('line-active'), false);
+  assert.equal(tracker.events[3].cell.classList.contains('line-active'), true);
+
+  tracker.setNow(3015);
+  loop(3015);
+  assert.equal(tracker.events[1].cell.classList.contains('line-active'), true);
+  assert.equal(tracker.events[2].cell.classList.contains('line-active'), true);
+  assert.equal(
+    tracker.starts.length,
+    6,
+    'B begins its next cycle at three seconds without waiting for A to finish at five',
+  );
+  tracker.mounted.destroy();
+});
+
+test('Free Time applies tempo, restart, sections, and count-in to the lane-local schedule', async () => {
+  const tracker = mountTimedTracker({
+    performanceMode: 'free-time',
+    scoreOverride: FREE_TIME_SCORE,
+    voicePackOverride: FREE_TIME_PACK,
+  });
+  tracker.tempo.value = '2';
+  tracker.tempo.emit('input');
+  await emitTrackerClick(tracker.playButton);
+  assert.deepEqual(
+    tracker.starts.map(({ playbackRate }) => playbackRate),
+    [2, 2, 2, 2],
+  );
+  assert.ok(Math.abs(tracker.starts[1].when - 1.515) < 1e-6);
+  assert.ok(Math.abs(tracker.starts[3].when - 1.015) < 1e-6);
+
+  tracker.setNow(500);
+  await emitTrackerClick(tracker.restartButton);
+  assert.equal(tracker.starts.length, 8, 'Restart relaunches every eligible lane together');
+
+  const later = tracker.sections.children.find((button) => button.dataset.s === 'later');
+  assert.ok(later, 'the later section control must exist');
+  await emitTrackerClick(tracker.sections, later);
+  assert.equal(tracker.starts.length, 10, 'the selected section schedules one event per lane');
+  assert.equal(tracker.starts[8].when, tracker.starts[9].when);
+  tracker.mounted.destroy();
+
+  const counted = mountTimedTracker({
+    performanceMode: 'free-time',
+    scoreOverride: FREE_TIME_SCORE,
+    voicePackOverride: FREE_TIME_PACK,
+    instantTimers: true,
+  });
+  await emitTrackerClick(counted.countinButton);
+  await emitTrackerClick(counted.playButton);
+  assert.equal(counted.starts.length, 4);
+  assert.equal(counted.playButton.textContent, '❚❚ Pause');
+  counted.mounted.destroy();
+});
+
+test('Free Time preserves tones, silence, mute, and solo without stopping its visual clocks', async () => {
+  const tones = mountTimedTracker({
+    performanceMode: 'free-time',
+    scoreOverride: FREE_TIME_SCORE,
+    voicePackOverride: FREE_TIME_PACK,
+  });
+  await emitTrackerClick(tones.sound, tones.toneButton);
+  await emitTrackerClick(tones.playButton);
+  assert.equal(tones.starts.length, 0);
+  assert.equal(tones.oscillatorStarts.length, 2, 'both opening lanes tone together');
+  const toneLoop = [...tones.animationFrames.values()][0];
+  tones.setNow(2015);
+  toneLoop(2015);
+  assert.equal(tones.oscillatorStarts.length, 3, 'B advances on its own second cue');
+  tones.mounted.destroy();
+
+  const silent = mountTimedTracker({
+    performanceMode: 'free-time',
+    scoreOverride: FREE_TIME_SCORE,
+    voicePackOverride: FREE_TIME_PACK,
+  });
+  const silentButton = silent.sound.children.find((button) => button.dataset.m === 'off');
+  await emitTrackerClick(silent.sound, silentButton);
+  await emitTrackerClick(silent.playButton);
+  assert.equal(silent.starts.length, 0);
+  const silentLoop = [...silent.animationFrames.values()][0];
+  silentLoop(15);
+  assert.ok(silent.events[0].cell.classList.contains('line-active'));
+  assert.ok(silent.events[2].cell.classList.contains('line-active'));
+  await emitTrackerClick(silent.sound, silent.voiceButton);
+  assert.equal(silent.starts.length, 4, 'Voices resume at the live lane-local offsets');
+  silent.mounted.destroy();
+
+  const muted = mountTimedTracker({
+    performanceMode: 'free-time',
+    scoreOverride: FREE_TIME_SCORE,
+    voicePackOverride: FREE_TIME_PACK,
+  });
+  await emitTrackerClick(muted.heads, muted.heads.children[1]);
+  await emitTrackerClick(muted.playButton);
+  assert.equal(muted.starts.length, 2, 'muting A schedules only B audio');
+  muted.mounted.destroy();
+
+  const soloed = mountTimedTracker({
+    performanceMode: 'free-time',
+    scoreOverride: FREE_TIME_SCORE,
+    voicePackOverride: FREE_TIME_PACK,
+  });
+  soloed.heads.emit('click', {
+    target: soloed.heads.children[2],
+    altKey: true,
+    shiftKey: false,
+  });
+  await flushTrackerWork();
+  await emitTrackerClick(soloed.playButton);
+  assert.equal(soloed.starts.length, 2, 'soloing B schedules only B audio');
+  soloed.mounted.destroy();
 });
 
 test('runtime row-complete transport schedules both lanes together and waits for the longer line', async () => {
@@ -1147,17 +1564,23 @@ test('runtime deferred voice decode cannot resume after the user leaves Voices',
   tracker.mounted.destroy();
 });
 
-test('Live cue ignores repeated strikes while the first voice-pack decode is pending', async () => {
-  const tracker = mountTimedTracker({ deferDecode: true });
-  await emitTrackerClick(tracker.ui.get('.t-mode'), tracker.cueButton);
-  tracker.ui.get('.t-play').emit('click');
-  tracker.ui.get('.t-play').emit('click');
-  await flushTrackerWork();
-  assert.equal(tracker.pendingDecodes.length, score.events.length);
-  for (const resolve of tracker.pendingDecodes) resolve();
-  await flushTrackerWork();
-  assert.equal(tracker.starts.length, score.lanes.length, 'only the first tracker row may advance');
-  tracker.mounted.destroy();
+test('Live cue stays shared and ignores repeated pending strikes in both performance modes', async () => {
+  for (const performanceMode of ['tracker', 'free-time']) {
+    const tracker = mountTimedTracker({ deferDecode: true, performanceMode });
+    await emitTrackerClick(tracker.ui.get('.t-mode'), tracker.cueButton);
+    tracker.playButton.emit('click');
+    tracker.playButton.emit('click');
+    await flushTrackerWork();
+    assert.equal(tracker.pendingDecodes.length, score.events.length);
+    for (const resolve of tracker.pendingDecodes) resolve();
+    await flushTrackerWork();
+    assert.equal(
+      tracker.starts.length,
+      score.lanes.length,
+      `${performanceMode} Live Cue advances only the first shared row`,
+    );
+    tracker.mounted.destroy();
+  }
 });
 
 test('render tools stage atomic outputs beside their destinations and provide font fallbacks', () => {

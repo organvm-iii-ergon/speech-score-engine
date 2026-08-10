@@ -24,6 +24,8 @@
     '<div class="caption t-caption"></div>',
     '<div class="transport">',
     '  <div class="trow"><div class="seg t-scores"></div></div>',
+    '  <div class="trow t-performance-row"><label class="performance-mode">Performance',
+    '    <select class="t-performance"></select></label></div>',
     '  <div class="trow t-voice-config-row"><label class="voice-config">Voice treatment',
     '    <select class="t-voice-config"></select></label></div>',
     '  <div class="tempo"><label>Tempo</label>',
@@ -57,9 +59,16 @@
     'theatrical',
     'octave-split',
   ];
+  const PERFORMANCE_MODES = [
+    { id: 'tracker', label: 'Tracker / Ableton' },
+    { id: 'free-time', label: 'Free time per lane' },
+  ];
 
   function mount(root, opts) {
     const SC = opts.score;
+    const PERFORMANCE = PERFORMANCE_MODES.some(({ id }) => id === opts.performance)
+      ? opts.performance
+      : 'tracker';
     const VOICE_CONFIG_IDS = Object.keys(SC.voiceConfigurations || {});
     if (!VOICE_CONFIG_IDS.length) VOICE_CONFIG_IDS.push(...DEFAULT_VOICE_CONFIGURATION_IDS);
     const requestedVoiceConfig = VOICE_CONFIG_IDS.includes(opts.voiceConfig)
@@ -87,7 +96,6 @@
       ((id) => {
         const p = new URLSearchParams(location.search);
         p.set('score', id);
-        p.delete('voiceConfig');
         location.search = p.toString();
       });
     const onVoiceConfig =
@@ -97,9 +105,18 @@
         p.set('voiceConfig', id);
         location.search = p.toString();
       });
+    const onPerformance =
+      opts.onPerformance ||
+      ((id) => {
+        const p = new URLSearchParams(location.search);
+        if (id === 'tracker') p.delete('performance');
+        else p.set('performance', id);
+        location.search = p.toString();
+      });
 
     root.classList.add('sse');
     root.dataset.score = SC.id;
+    root.dataset.performance = PERFORMANCE;
     const artworkMeta = SC.artwork;
     const hasArtwork = Boolean(artworkMeta?.image);
     if (hasArtwork) root.dataset.artwork = artworkMeta.id || 'present';
@@ -235,7 +252,7 @@
       }
       return scheduledRows.length ? { duration: cursor, rows: scheduledRows } : null;
     };
-    const rowCompletePlan = deriveRowCompletePlan();
+    const rowCompletePlan = PERFORMANCE === 'tracker' ? deriveRowCompletePlan() : null;
 
     // ---- audio ----
     let silent = false;
@@ -622,6 +639,8 @@
         const cell = document.createElement('div');
         const align = alignById.get(c);
         cell.className = `cell${align ? ` align-${align}` : ''}`;
+        cell.dataset.lane = c;
+        cell.dataset.row = String(r);
         cellRef.set(`${r}:${c}`, cell);
         row.appendChild(cell);
       }
@@ -693,6 +712,100 @@
     };
     const timedCues = deriveTimedCues();
 
+    // Free Time turns every lane into its own natural-duration sequence. All eligible lanes launch
+    // together, but after that their clip ends, authored rests, and loop boundaries are local. The
+    // plan stays in score-time seconds; the global Tempo control applies one common scale at play.
+    const timingForEvent = (ev) => TIMINGS?.[`${ev.lane}|${ev.speechText || ev.text}`] || null;
+    const deriveFreeTimePlan = (sectionStart, sectionEnd) => {
+      const lanePlans = [];
+      for (const lane of CH) {
+        const sourceEvent = EV.find(
+          (ev) => ev.lane === lane && ev.speechText && !ev.silent && timingForEvent(ev),
+        );
+        const selectedTimedCues = (timedCues || [])
+          .filter(
+            (cue) =>
+              cue.ev.lane === lane && cue.ev.tick >= sectionStart && cue.ev.tick < sectionEnd,
+          )
+          .sort((left, right) => left.ev.tick - right.ev.tick);
+
+        // Preserve the existing word-boundary illumination for a continuous passage. A section
+        // starts from its first selected word group, even when the one source clip begins earlier.
+        if (sourceEvent && selectedTimedCues.length) {
+          const laneCues = timedCues
+            .filter((cue) => cue.ev.lane === lane)
+            .sort((left, right) => left.ev.tick - right.ev.tick);
+          const firstCue = selectedTimedCues[0];
+          const nextSectionCue = laneCues.find((cue) => cue.ev.tick >= sectionEnd);
+          const timing = timingForEvent(sourceEvent);
+          const sectionTrimStart = Math.max(0, firstCue.start - 0.06);
+          const sourceStart = Math.max(0, (sourceEvent.trimStart || 0) + sectionTrimStart);
+          const timingEnd = Math.max(
+            sourceStart + 0.02,
+            Math.min(timing.duration, nextSectionCue?.start ?? timing.duration),
+          );
+          const sourceEnd = timingEnd - Math.max(0, sourceEvent.trimEnd || 0);
+          const duration = Math.max(0.02, sourceEnd - sourceStart);
+          const event = {
+            ...sourceEvent,
+            silent: false,
+            sectionTrimStart,
+            timingEnd,
+          };
+          lanePlans.push({
+            lane,
+            duration,
+            entries: [{ event, start: 0, end: duration, timing }],
+            cues: selectedTimedCues.map((cue, index) => ({
+              ev: cue.ev,
+              index,
+              start: Math.max(0, cue.start - sourceStart),
+              end: Math.min(duration, Math.max(0, cue.end - sourceStart)),
+            })),
+          });
+          continue;
+        }
+
+        const events = EV.filter(
+          (ev) =>
+            ev.lane === lane &&
+            !ev.silent &&
+            ev.el &&
+            ev.tick >= sectionStart &&
+            ev.tick < sectionEnd,
+        ).sort((left, right) => left.tick - right.tick);
+        if (!events.length) continue;
+        let cursor = 0;
+        const entries = [];
+        const cues = [];
+        for (let index = 0; index < events.length; index += 1) {
+          const event = events[index];
+          const timing = timingForEvent(event);
+          const naturalDuration = timing?.duration || evBeats(event) / scoreTempoBps;
+          const duration = Math.max(
+            0.02,
+            naturalDuration - Math.max(0, event.trimStart || 0) - Math.max(0, event.trimEnd || 0),
+          );
+          const start = cursor;
+          const end = start + duration;
+          const scheduledEvent = timing ? { ...event, timingEnd: timing.duration } : event;
+          entries.push({ event: scheduledEvent, start, end, timing });
+          cues.push({ ev: event, index, start, end });
+          const next = events[index + 1];
+          const restBeats = next
+            ? Math.max(0, evStartBeats(next) - (evStartBeats(event) + evBeats(event)))
+            : 0;
+          cursor = end + restBeats / scoreTempoBps;
+        }
+        lanePlans.push({ lane, duration: cursor, entries, cues });
+      }
+      if (!lanePlans.length) return null;
+      return {
+        lanes: lanePlans,
+        duration: Math.max(...lanePlans.map((lane) => lane.duration)),
+      };
+    };
+
     // ---- score picker + section chips ----
     const scoresSeg = q('.t-scores');
     for (const s of ALL) {
@@ -708,6 +821,17 @@
       onPick(b.dataset.score);
     };
     scoresSeg.addEventListener('click', onScorePick);
+
+    const performanceSelect = q('.t-performance');
+    if (performanceSelect) {
+      for (const mode of PERFORMANCE_MODES) {
+        const option = document.createElement('option');
+        option.value = mode.id;
+        option.textContent = mode.label;
+        performanceSelect.appendChild(option);
+      }
+      performanceSelect.value = PERFORMANCE;
+    }
 
     const voiceConfigRow = q('.t-voice-config-row');
     const voiceConfigSelect = q('.t-voice-config');
@@ -761,6 +885,9 @@
     let timedPassageDuration = 0;
     let timedTempoScale = 1;
     let rowCompleteOffset = 0;
+    let freeTimePlan = null;
+    let freeTimeScheduledCycles = new Map();
+    let freeTimeToneCycles = new Map();
     // A timed Tones performance sounds each visible lane line once. Store event identities rather
     // than rows: simultaneous lanes and silent continuation rows each carry their own cue.
     let timedToneCues = new Set();
@@ -791,6 +918,8 @@
     // Timed sections are authored as half-open spans. Keep the legacy inclusive range untouched,
     // but use the score's full tick count as the exclusive end for continuous-passage transport.
     const timedRange = () => (sel === 'full' ? [0, TOTAL] : SECTIONS[sel]);
+    const automaticRange = () =>
+      PERFORMANCE === 'free-time' || timedCues || rowCompletePlan ? timedRange() : range();
     const clearPerformed = () => {
       timedRunGeneration += 1;
       timedVoiceResumeGeneration += 1;
@@ -804,6 +933,9 @@
       timedPassageDuration = 0;
       timedTempoScale = 1;
       rowCompleteOffset = 0;
+      freeTimePlan = null;
+      freeTimeScheduledCycles = new Map();
+      freeTimeToneCycles = new Map();
       timedToneCues = new Set();
     };
     const renderRow = (row) => {
@@ -901,6 +1033,109 @@
         if (timedToneCues.has(cue.ev)) continue;
         timedToneCues.add(cue.ev);
         if (laneIsAudible(cue.ev.lane)) tone(cue.ev.lane, ctx.currentTime);
+      }
+    };
+    const freeTimeElapsed = (timestamp = performance.now()) =>
+      timedStartTs === null
+        ? 0
+        : Math.max(0, ((timestamp - timedStartTs) / 1000) * timedTempoScale);
+    const freeTimeLanePosition = (lanePlan, timestamp = performance.now()) => {
+      const elapsed = freeTimeElapsed(timestamp);
+      const cycle = Math.floor(elapsed / lanePlan.duration);
+      return { cycle, local: elapsed - cycle * lanePlan.duration };
+    };
+    const freeTimeVoiceEvents = (lanePlan, localOffset) =>
+      lanePlan.entries.flatMap((entry) => {
+        if (localOffset >= entry.end) return [];
+        const trimIntoEvent = Math.max(0, localOffset - entry.start);
+        return [
+          {
+            ...entry.event,
+            sectionTrimStart: (entry.event.sectionTrimStart || 0) + trimIntoEvent,
+            scheduleSeconds: Math.max(0, (entry.start - localOffset) / timedTempoScale),
+            transportRate: timedTempoScale,
+          },
+        ];
+      });
+    const scheduleFreeTimeLane = (lanePlan, localOffset) => {
+      const events = freeTimeVoiceEvents(lanePlan, localOffset);
+      if (!events.length) return false;
+      voice(events);
+      return true;
+    };
+    const startFreeTimePassage = () => {
+      const [sectionStart, sectionEnd] = timedRange();
+      const plan = deriveFreeTimePlan(sectionStart, sectionEnd);
+      if (!plan) return false;
+      timedRunGeneration += 1;
+      freeTimePlan = plan;
+      timedTempoScale = tempoBps / scoreTempoBps;
+      timedPassageDuration = plan.duration / timedTempoScale;
+      timedStartTs = performance.now() + 15;
+      hasStruckCurrent = true;
+      freeTimeScheduledCycles = new Map(plan.lanes.map((lanePlan) => [lanePlan.lane, 0]));
+      freeTimeToneCycles = new Map();
+      if (soundMode === 'tone') {
+        illuminateFreeTime(timedStartTs);
+      } else {
+        // One voice() call gives every lane the exact same Web Audio base time. Its later events are
+        // offset only by that lane's natural clips and authored local rests.
+        voice(plan.lanes.flatMap((lanePlan) => freeTimeVoiceEvents(lanePlan, 0)));
+      }
+      return true;
+    };
+    const resumeFreeTimeVoices = async () => {
+      if (!freeTimePlan || !CLIPS || timedStartTs === null) return false;
+      const run = timedRunGeneration;
+      const resume = ++timedVoiceResumeGeneration;
+      if (!(await resumeAudio())) return false;
+      const ready = await loadSamples();
+      if (!ready || resume !== timedVoiceResumeGeneration || !timedRunIsActive(run)) return false;
+      for (const lanePlan of freeTimePlan.lanes) {
+        const { cycle, local } = freeTimeLanePosition(lanePlan);
+        scheduleFreeTimeLane(lanePlan, local);
+        freeTimeScheduledCycles.set(lanePlan.lane, cycle);
+      }
+      return true;
+    };
+    const illuminateFreeTime = (timestamp) => {
+      if (!freeTimePlan || timedStartTs === null) return;
+      nowWords = [];
+      const activeRows = [];
+      for (const lanePlan of freeTimePlan.lanes) {
+        const { cycle, local } = freeTimeLanePosition(lanePlan, timestamp);
+        let toneCycle = freeTimeToneCycles.get(lanePlan.lane);
+        if (!toneCycle || toneCycle.cycle !== cycle) {
+          toneCycle = { cycle, cues: new Set() };
+          freeTimeToneCycles.set(lanePlan.lane, toneCycle);
+        }
+        const scheduledCycle = freeTimeScheduledCycles.get(lanePlan.lane) ?? -1;
+        if (soundMode === 'voice' && !silent && cycle > scheduledCycle) {
+          scheduleFreeTimeLane(lanePlan, local);
+          freeTimeScheduledCycles.set(lanePlan.lane, cycle);
+        }
+        for (const cueItem of lanePlan.cues) {
+          const isNow = local >= cueItem.start && local < cueItem.end;
+          cueItem.ev.el?.classList.toggle('now', isNow);
+          cueItem.ev.el?.classList.toggle('spoken', local >= cueItem.end);
+          cueItem.ev.cell?.classList.toggle('line-active', isNow);
+          if (!isNow) continue;
+          if (cueItem.ev.el) nowWords.push(cueItem.ev.el);
+          activeRows.push(cueItem.ev.tick);
+          if (soundMode === 'tone' && !toneCycle.cues.has(cueItem.index)) {
+            toneCycle.cues.add(cueItem.index);
+            if (laneIsAudible(cueItem.ev.lane) && ensureCtx() && ctx) {
+              tone(cueItem.ev.lane, ctx.currentTime);
+            }
+          }
+        }
+      }
+      if (activeRows.length) {
+        const activeRow = Math.max(...activeRows);
+        if (activeRow !== currentRow) {
+          currentRow = activeRow;
+          renderRow(activeRow);
+        }
       }
     };
     const planTimedPassage = (sectionStart, sectionEnd, transportRate = 1) => {
@@ -1093,6 +1328,11 @@
     };
 
     const loop = (ts) => {
+      if (PERFORMANCE === 'free-time' && freeTimePlan && timedStartTs !== null) {
+        illuminateFreeTime(ts);
+        rafId = requestAnimationFrame(loop);
+        return;
+      }
       if (rowCompletePlan && timedStartTs !== null) {
         illuminateRowComplete(ts);
         if ((ts - timedStartTs) / 1000 >= timedPassageDuration) {
@@ -1151,7 +1391,8 @@
     const beginPlaying = (generation) => {
       if (!playRequestIsCurrent(generation)) return;
       if (!hasStruckCurrent) {
-        if (rowCompletePlan) startRowCompletePassage();
+        if (PERFORMANCE === 'free-time') startFreeTimePassage();
+        else if (rowCompletePlan) startRowCompletePassage();
         else if (timedCues) startTimedPassage();
         else advance(currentRow);
       }
@@ -1196,7 +1437,7 @@
       if (playing || counting || starting) return;
       const generation = ++playGeneration;
       starting = true;
-      const [s, e] = timedCues || rowCompletePlan ? timedRange() : range();
+      const [s, e] = automaticRange();
       if (currentRow < s || currentRow >= e) {
         clearPerformed();
         currentRow = s;
@@ -1227,8 +1468,8 @@
         cancelAnimationFrame(rafId);
         rafId = null;
       }
-      if (timedCues || rowCompletePlan) {
-        const [s] = range();
+      if (PERFORMANCE === 'free-time' || timedCues || rowCompletePlan) {
+        const [s] = automaticRange();
         clearPerformed();
         currentRow = s;
         hasStruckCurrent = false;
@@ -1241,16 +1482,17 @@
       pause();
       cued = false;
       enableMidi();
-      const [s] = range();
+      const [s] = automaticRange();
       clearPerformed();
       currentRow = s;
       renderRow(s);
     };
     // Rows that actually hold a line, within the selected passage, in order.
     const cueRows = () => {
-      const [s, e] = timedCues || rowCompletePlan ? timedRange() : range();
+      const halfOpen = PERFORMANCE === 'free-time' || timedCues || rowCompletePlan;
+      const [s, e] = halfOpen ? timedRange() : range();
       return [...eventsByRow.keys()]
-        .filter((r) => r >= s && (timedCues || rowCompletePlan ? r < e : r <= e))
+        .filter((r) => r >= s && (halfOpen ? r < e : r <= e))
         .sort((a, b) => a - b);
     };
     // Each cue strikes the NEXT LINE (not the next empty grid-beat) — the human drives line by line.
@@ -1324,9 +1566,11 @@
       if (!hint) return;
       hint.textContent = cue
         ? 'Live cue — Space / → / pedal strikes the next line, ← steps back. You set the pace; the AI answers.'
-        : rowCompletePlan
-          ? 'Tracker mode — both lines begin together; the next row waits for the longer read.'
-          : 'Loop a section · click a header to mute · ⌥/Alt-click to solo a voice.';
+        : PERFORMANCE === 'free-time'
+          ? 'Free time — lanes launch together, then follow their own clips and local rests.'
+          : rowCompletePlan
+            ? 'Tracker mode — both lines begin together; the next row waits for the longer read.'
+            : 'Loop a section · click a header to mute · ⌥/Alt-click to solo a voice.';
     };
 
     tempo.value = String(tempoBps);
@@ -1345,7 +1589,7 @@
         enterCue();
         return;
       }
-      const [s] = rowCompletePlan ? timedRange() : range();
+      const [s] = automaticRange();
       acc = 0;
       stopSamples();
       clearPerformed();
@@ -1353,7 +1597,8 @@
       hasStruckCurrent = false;
       renderRow(s);
       if (playing) {
-        if (rowCompletePlan) startRowCompletePassage();
+        if (PERFORMANCE === 'free-time') startFreeTimePassage();
+        else if (rowCompletePlan) startRowCompletePassage();
         else if (timedCues) startTimedPassage();
         else advance(s);
       } else illuminate(s);
@@ -1371,6 +1616,20 @@
       hasStruckCurrent = false;
       renderRow(0);
       onVoiceConfig(next);
+    };
+    const onPerformanceChange = () => {
+      const next = performanceSelect?.value;
+      if (!next || next === PERFORMANCE) return;
+      pause();
+      sel = 'full';
+      for (const button of sections.children) {
+        button.classList.toggle('on', button.dataset.s === 'full');
+      }
+      clearPerformed();
+      currentRow = 0;
+      hasStruckCurrent = false;
+      renderRow(0);
+      onPerformance(next);
     };
     const onMode = (e) => {
       const b = e.target.closest('button');
@@ -1462,6 +1721,13 @@
           // Tones intentionally stops the continuous clips while the timed visual clock keeps
           // advancing. Restore their current source offset rather than restarting the section.
           if (
+            PERFORMANCE === 'free-time' &&
+            freeTimePlan &&
+            playing &&
+            (previousSoundMode === 'tone' || activeSources.size === 0)
+          ) {
+            void resumeFreeTimeVoices();
+          } else if (
             rowCompletePlan &&
             playing &&
             (previousSoundMode === 'tone' || activeSources.size === 0)
@@ -1485,13 +1751,14 @@
     const onTempo = () => {
       tempoBps = Number.parseFloat(tempo.value);
       rps = tempoBps * SUBDIV;
-      if ((rowCompletePlan || timedCues) && playing) {
+      if ((PERFORMANCE === 'free-time' || rowCompletePlan || timedCues) && playing) {
         stopSamples();
         clearPerformed();
-        const [s] = timedRange();
+        const [s] = automaticRange();
         currentRow = s;
         renderRow(s);
-        if (rowCompletePlan) startRowCompletePassage();
+        if (PERFORMANCE === 'free-time') startFreeTimePassage();
+        else if (rowCompletePlan) startRowCompletePassage();
         else startTimedPassage();
       }
     };
@@ -1501,7 +1768,7 @@
       sel = b.dataset.s;
       if (cue) cued = false;
       for (const btn of sections.children) btn.classList.toggle('on', btn === b);
-      const [s] = rowCompletePlan ? timedRange() : range();
+      const [s] = automaticRange();
       acc = 0;
       stopSamples();
       clearPerformed();
@@ -1509,7 +1776,8 @@
       hasStruckCurrent = false;
       renderRow(s);
       if (playing) {
-        if (rowCompletePlan) startRowCompletePassage();
+        if (PERFORMANCE === 'free-time') startFreeTimePassage();
+        else if (rowCompletePlan) startRowCompletePassage();
         else if (timedCues) startTimedPassage();
         else advance(s);
       } else illuminate(s);
@@ -1521,6 +1789,7 @@
 
     playBtn.addEventListener('click', onPlay);
     restartBtn.addEventListener('click', onRestart);
+    performanceSelect?.addEventListener('change', onPerformanceChange);
     voiceConfigSelect?.addEventListener('change', onVoiceConfigChange);
     soundSeg.addEventListener('click', onSound);
     modeSeg.addEventListener('click', onMode);
@@ -1545,6 +1814,7 @@
         playing = false;
         if (rafId !== null) cancelAnimationFrame(rafId);
         clearCount();
+        performanceSelect?.removeEventListener('change', onPerformanceChange);
         voiceConfigSelect?.removeEventListener('change', onVoiceConfigChange);
         window.removeEventListener('resize', onResize);
         window.removeEventListener('keydown', onKey);
@@ -1557,6 +1827,8 @@
         if (ctx && ctx.state !== 'closed') ctx.close();
         root.innerHTML = '';
         delete root.dataset.score;
+        delete root.dataset.performance;
+        delete root.dataset.artwork;
         root.classList.remove('sse');
       },
     };

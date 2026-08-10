@@ -397,7 +397,8 @@
   accent-color: var(--accent);
   height: 2px;
 }
-.sse .voice-config {
+.sse .voice-config,
+.sse .performance-mode {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -406,7 +407,8 @@
   text-transform: uppercase;
   color: var(--label);
 }
-.sse .voice-config select {
+.sse .voice-config select,
+.sse .performance-mode select {
   font-family: var(--serif);
   font-size: 11px;
   padding: 5px 8px;
@@ -568,27 +570,14 @@
   z-index: 2;
   display: flex;
   align-items: center;
-  width: 100%;
+  justify-self: center;
+  width: calc(100% - 4px);
+  margin-inline: 2px;
   min-height: 1.5em;
   color: var(--ink);
   background: #ffffff;
   border-radius: 0;
   box-shadow: 0 1px 8px rgba(29, 29, 27, 0.14);
-}
-.sse[data-artwork] .cell.align-right.line-active {
-  justify-self: start;
-  width: calc(100% - 3px);
-  margin-right: 3px;
-}
-.sse[data-artwork] .cell.align-left.line-active {
-  justify-self: end;
-  width: calc(100% - 3px);
-  margin-left: 3px;
-}
-.sse[data-artwork] .cell.align-center.line-active {
-  justify-self: center;
-  width: calc(100% - 4px);
-  margin-inline: 2px;
 }
 .sse[data-artwork] .cell.line-active .word,
 .sse[data-artwork] .cell.line-active .word.now {
