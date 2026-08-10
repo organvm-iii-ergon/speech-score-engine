@@ -14,6 +14,15 @@ import {
   removeContinuousPassageEvent,
   renameContinuousPassageLine,
 } from '../../apps/web/src/lib/scoreEditing.js';
+import {
+  resolveVoiceConfigurationId,
+  selectVoicePackConfiguration,
+} from '../../apps/web/src/lib/voiceConfigurations.js';
+import {
+  probeAudio,
+  transposeAudioDurationPreserving,
+  transposeFilter,
+} from '../../tools/pitch-preserving-transpose.mjs';
 import { deriveRowCompleteSchedule } from '../../tools/row-complete-schedule.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -34,6 +43,28 @@ const EXPECTED_PAIRS = [
   ['to be', 'from my birth.'],
   ['so soft', 'it hurts.'],
 ];
+const EXPECTED_VOICE_CONFIGURATIONS = {
+  natural: {
+    LADY_MACBETH: { pitch: '+0Hz' },
+    MACBETH: { pitch: '+0Hz' },
+  },
+  subtle: {
+    LADY_MACBETH: { pitch: '+10Hz' },
+    MACBETH: { pitch: '-10Hz' },
+  },
+  separated: {
+    LADY_MACBETH: { pitch: '+20Hz' },
+    MACBETH: { pitch: '-20Hz' },
+  },
+  theatrical: {
+    LADY_MACBETH: { pitch: '+35Hz' },
+    MACBETH: { pitch: '-35Hz' },
+  },
+  'octave-split': {
+    LADY_MACBETH: { transposeSemitones: 6 },
+    MACBETH: { transposeSemitones: -6 },
+  },
+};
 
 function evaluateRegistration(file, registration) {
   const sandbox = {};
@@ -64,6 +95,7 @@ function withCliSandbox(tool, callback) {
   try {
     const toolFile = copyIntoSandbox(sandboxRoot, `tools/${tool}`);
     copyIntoSandbox(sandboxRoot, 'tools/row-complete-schedule.mjs');
+    copyIntoSandbox(sandboxRoot, 'apps/web/src/lib/voiceConfigurations.js');
     const scoreFile = copyIntoSandbox(sandboxRoot, SCORE_RELATIVE);
     const voiceFile = copyIntoSandbox(sandboxRoot, VOICE_RELATIVE);
     const inputs = path.join(sandboxRoot, 'test-inputs');
@@ -207,11 +239,18 @@ function fakeElement(tagName = 'div') {
   };
 }
 
-function mountTimedTracker({ deferDecode = false } = {}) {
+function mountTimedTracker({
+  deferDecode = false,
+  voiceConfig = score.defaultVoiceConfiguration,
+  missingClipKey = null,
+} = {}) {
   let now = 0;
   let nextAnimationFrame = 1;
   const animationFrames = new Map();
   const oscillatorStarts = [];
+  const panners = [];
+  const selectedVoiceConfigurations = [];
+  const speechUtterances = [];
   const starts = [];
   const pendingDecodes = [];
   const decodedBuffer = {
@@ -250,6 +289,7 @@ function mountTimedTracker({ deferDecode = false } = {}) {
     createStereoPanner() {
       const panner = fakeElement('panner');
       panner.pan = { value: 0 };
+      panners.push(panner);
       return panner;
     }
 
@@ -310,6 +350,8 @@ function mountTimedTracker({ deferDecode = false } = {}) {
   createUi('.t-heads');
   createUi('.t-scores');
   createUi('.t-sections');
+  createUi('.t-voice-config-row');
+  const voiceConfigSelect = createUi('.t-voice-config', 'select');
   createUi('.t-play', 'button');
   createUi('.t-restart', 'button');
   const sound = createUi('.t-sound');
@@ -332,10 +374,22 @@ function mountTimedTracker({ deferDecode = false } = {}) {
   createUi('.t-hint');
 
   const runtimeScore = JSON.parse(JSON.stringify(score));
-  const runtimeTimings = JSON.parse(JSON.stringify(voicePack.timings));
+  const selectedPack = selectVoicePackConfiguration(score, voicePack, voiceConfig);
+  const runtimeTimings = JSON.parse(JSON.stringify(selectedPack.timings));
   const clips = Object.fromEntries(Object.keys(runtimeTimings).map((key) => [key, 'AA==']));
+  if (missingClipKey) delete clips[missingClipKey];
+  const speechSynthesis = {
+    pending: false,
+    getVoices: () => [{ name: 'Test English', lang: 'en-GB' }],
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    resume: () => {},
+    cancel: () => {},
+    speak: (utterance) => speechUtterances.push(utterance),
+  };
   const window = {
     AudioContext: FakeAudioContext,
+    speechSynthesis,
     addEventListener: () => {},
     removeEventListener: () => {},
     setTimeout,
@@ -354,6 +408,11 @@ function mountTimedTracker({ deferDecode = false } = {}) {
     cancelAnimationFrame: (id) => animationFrames.delete(id),
     atob: (value) => Buffer.from(value, 'base64').toString('binary'),
     clearTimeout,
+    SpeechSynthesisUtterance: class {
+      constructor(text) {
+        this.text = text;
+      }
+    },
   };
   vm.createContext(sandbox);
   new vm.Script(
@@ -363,23 +422,29 @@ function mountTimedTracker({ deferDecode = false } = {}) {
     score: runtimeScore,
     clips,
     timings: runtimeTimings,
+    voiceConfig,
     scores: [runtimeScore],
+    onVoiceConfig: (id) => selectedVoiceConfigurations.push(id),
   });
 
   return {
     animationFrames,
     mounted,
     oscillatorStarts,
+    panners,
     pendingDecodes,
     setNow: (value) => {
       now = value;
     },
     sound,
     starts,
+    selectedVoiceConfigurations,
+    speechUtterances,
     toneButton,
     ui,
     cueButton,
     voiceButton,
+    voiceConfigSelect,
   };
 }
 
@@ -408,6 +473,18 @@ test('score preserves the nine simultaneous left/right pairs and row-complete la
       { id: 'MACBETH', align: 'left' },
     ],
   );
+  assert.deepEqual(
+    score.lanes.map(({ id, pan }) => ({ id, pan })),
+    [
+      { id: 'LADY_MACBETH', pan: -1 },
+      { id: 'MACBETH', pan: 1 },
+    ],
+  );
+  assert.equal(score.lanes[0].tone.f, 466.16);
+  assert.equal(score.lanes[1].tone.f, 233.08);
+  assert.equal(score.lanes[0].tone.f / score.lanes[1].tone.f, 2);
+  assert.deepEqual(score.voiceConfigurations, EXPECTED_VOICE_CONFIGURATIONS);
+  assert.equal(score.defaultVoiceConfiguration, 'separated');
 
   assert.equal(score.events.length, EXPECTED_PAIRS.length * score.lanes.length);
   for (let row = 0; row < EXPECTED_PAIRS.length; row += 1) {
@@ -439,47 +516,89 @@ test('dramatic sections are a nonoverlapping half-open partition of all nine pai
   assert.equal(new Set(coveredRows).size, coveredRows.length);
 });
 
-test('generated timings cover every rendered line in its own lane', () => {
+test('all generated voice configurations cover every rendered line and identify their treatment', () => {
   assert.ok(voicePack, 'voice pack must self-register');
   assert.equal(voicePack.count, score.events.length);
+  assert.equal(voicePack.totalCount, score.events.length * 5);
   assert.equal(Object.keys(voicePack.clips).length, score.events.length);
   assert.equal(Object.keys(voicePack.timings).length, score.events.length);
+  assert.deepEqual(
+    Object.keys(voicePack.configurations),
+    Object.keys(EXPECTED_VOICE_CONFIGURATIONS),
+  );
+  assert.deepEqual(voicePack.clips, voicePack.configurations.separated.clips);
+  assert.deepEqual(voicePack.timings, voicePack.configurations.separated.timings);
 
-  score.lanes.forEach((lane, laneIndex) => {
-    for (const [row, pair] of score.visualPairs.entries()) {
-      const event = score.events.find(
-        (candidate) => candidate.row === row && candidate.lane === lane.id,
-      );
-      const key = `${lane.id}|${event.text}`;
-      const timing = voicePack.timings[key];
-      assert.ok(voicePack.clips[key], `${lane.id} row ${row} clip must match its line key`);
-      assert.ok(timing, `${lane.id} row ${row} timing must match its line key`);
-      assert.equal(timing.voice, lane.voice);
-      assert.equal(timing.rate, lane.rate);
-      assert.deepEqual(
-        timing.words.map((word) => tokens(word.text)[0]),
-        tokens(pair[laneIndex]),
-        `${lane.id} row ${row} timing must cover ${JSON.stringify(pair[laneIndex])}`,
-      );
-    }
-  });
+  for (const [configurationId, treatments] of Object.entries(EXPECTED_VOICE_CONFIGURATIONS)) {
+    const configuration = voicePack.configurations[configurationId];
+    assert.equal(configuration.count, score.events.length);
+    assert.equal(Object.keys(configuration.clips).length, score.events.length);
+    assert.equal(Object.keys(configuration.timings).length, score.events.length);
+    score.lanes.forEach((lane, laneIndex) => {
+      for (const [row, pair] of score.visualPairs.entries()) {
+        const event = score.events.find(
+          (candidate) => candidate.row === row && candidate.lane === lane.id,
+        );
+        const key = `${lane.id}|${event.text}`;
+        const timing = configuration.timings[key];
+        assert.ok(configuration.clips[key], `${configurationId} ${lane.id} row ${row} clip`);
+        assert.ok(timing, `${configurationId} ${lane.id} row ${row} timing`);
+        assert.equal(timing.voice, lane.voice);
+        assert.equal(timing.rate, lane.rate);
+        assert.equal(timing.pitch, treatments[lane.id].pitch || '+0Hz');
+        assert.equal(timing.transposeSemitones, treatments[lane.id].transposeSemitones || 0);
+        assert.deepEqual(
+          timing.words.map((word) => tokens(word.text)[0]),
+          tokens(pair[laneIndex]),
+          `${configurationId} ${lane.id} row ${row} timing must cover ${JSON.stringify(pair[laneIndex])}`,
+        );
+      }
+    });
+  }
 });
 
-test('row-complete schedule starts each pair together and waits for both natural-speed reads', () => {
-  const schedule = deriveRowCompleteSchedule(score, voicePack);
-  assert.ok(schedule);
-  assert.equal(schedule.rows.length, EXPECTED_PAIRS.length);
-  assert.ok(schedule.duration > 0);
+test('voice configuration selection resolves URL/default choices and rejects unknown CLI choices', () => {
+  assert.equal(resolveVoiceConfigurationId(score, 'natural'), 'natural');
+  assert.equal(resolveVoiceConfigurationId(score, 'unknown'), 'separated');
+  assert.equal(selectVoicePackConfiguration(score, voicePack, 'subtle').id, 'subtle');
+  assert.throws(
+    () => selectVoicePackConfiguration(score, voicePack, 'unknown', { strict: true }),
+    /Unknown voice configuration "unknown"/,
+  );
+});
 
+test('every voice configuration produces a valid row-complete schedule', () => {
+  for (const configurationId of Object.keys(EXPECTED_VOICE_CONFIGURATIONS)) {
+    const selected = selectVoicePackConfiguration(score, voicePack, configurationId);
+    const schedule = deriveRowCompleteSchedule(score, selected);
+    assert.ok(schedule);
+    assert.equal(schedule.rows.length, EXPECTED_PAIRS.length);
+    assert.ok(schedule.duration > 0);
+    schedule.rows.forEach((row, index) => {
+      assert.equal(row.clips.length, score.lanes.length, `row ${row.row} must start both players`);
+      assert.ok(row.clips.every((clip) => clip.start === row.start));
+      assert.equal(row.duration, Math.max(...row.clips.map((clip) => clip.timing.duration)));
+      if (index > 0) assert.equal(row.start, schedule.rows[index - 1].end);
+    });
+  }
   for (const lane of score.lanes) {
     assert.equal(lane.rate, '+0%', `${lane.id} must keep normal rendered word speed`);
   }
-  schedule.rows.forEach((row, index) => {
-    assert.equal(row.clips.length, score.lanes.length, `row ${row.row} must start both players`);
-    assert.ok(row.clips.every((clip) => clip.start === row.start));
-    assert.equal(row.duration, Math.max(...row.clips.map((clip) => clip.timing.duration)));
-    if (index > 0) assert.equal(row.start, schedule.rows[index - 1].end);
-  });
+});
+
+test('the default row-complete schedule uses the separated timing aliases', () => {
+  const schedule = deriveRowCompleteSchedule(score, voicePack);
+  const separated = deriveRowCompleteSchedule(score, voicePack.configurations.separated);
+  assert.deepEqual(schedule, separated);
+  assert.equal(schedule.rows.length, EXPECTED_PAIRS.length);
+  for (const row of schedule.rows) {
+    for (const clip of row.clips) {
+      assert.equal(
+        clip.timing.pitch,
+        EXPECTED_VOICE_CONFIGURATIONS.separated[clip.event.lane].pitch,
+      );
+    }
+  }
 });
 
 test('credits identify the poem, artwork/source, and remix without presenting play dialogue', () => {
@@ -525,6 +644,10 @@ test('library, tracker, editor, and standalone source all register the score lan
   assert.match(editor, /SCORE_SCRIPTS/);
   assert.match(standalone, /scores\/lady-macbeth-macbeth\.js/);
   assert.match(standalone, /voices\/lady-macbeth-macbeth\.js/);
+  assert.match(tracker, /get\('voiceConfig'\)/);
+  assert.match(tracker, /params\.set\('voiceConfig', nextId\)/);
+  assert.match(standalone, /params\.get\('voiceConfig'\)/);
+  assert.match(standalone, /voicePack: voices/);
 });
 
 test('editing a continuous-passage continuation rebuilds its source passage in visual order', () => {
@@ -601,6 +724,11 @@ test('the editor preserves row-complete playback metadata through load and expor
   );
   assert.match(editor, /setPlayback\(sc\.playback\)/);
   assert.match(editor, /\.\.\.\(playback \? \{ playback \} : \{\}\)/);
+  assert.match(editor, /setVoiceConfigurations\(/);
+  assert.match(editor, /Object\.entries\(sc\.voiceConfigurations \|\| \{\}\)/);
+  assert.match(editor, /defaultVoiceConfiguration:/);
+  assert.match(editor, /selectedVoiceConfiguration \|\| Object\.keys\(voiceConfigurations\)\[0\]/);
+  assert.match(editor, /aria-label="Voice treatment"/);
   assert.match(editor, /moveContinuousPassageEvent\(prev, d\.id, lane\)/);
   assert.match(editor, /removeContinuousPassageEvent\(prev, selected\)/);
 });
@@ -731,6 +859,37 @@ test('runtime row-complete transport schedules both lanes together and waits for
       `row ${row.row} must begin only after the previous row's longer clip ends`,
     );
   });
+  assert.equal(
+    tracker.panners.filter((panner) => panner.pan.value === -1).length,
+    EXPECTED_PAIRS.length,
+  );
+  assert.equal(
+    tracker.panners.filter((panner) => panner.pan.value === 1).length,
+    EXPECTED_PAIRS.length,
+  );
+  tracker.mounted.destroy();
+});
+
+test('tracker configuration switching stops playback, resets, and routes the new selection', async () => {
+  const tracker = mountTimedTracker();
+  await emitTrackerClick(tracker.ui.get('.t-play'));
+  assert.ok(tracker.animationFrames.size > 0);
+  tracker.voiceConfigSelect.value = 'natural';
+  tracker.voiceConfigSelect.emit('change');
+  assert.deepEqual(tracker.selectedVoiceConfigurations, ['natural']);
+  assert.equal(tracker.animationFrames.size, 0, 'configuration changes must stop the active loop');
+  tracker.mounted.destroy();
+});
+
+test('a missing configured neural clip falls back to a hard-panned tone, never browser speech', async () => {
+  const missingKey = `LADY_MACBETH|${EXPECTED_PAIRS[0][0]}`;
+  const tracker = mountTimedTracker({ missingClipKey: missingKey });
+  await emitTrackerClick(tracker.ui.get('.t-play'));
+  assert.equal(tracker.starts.length, score.events.length - 1);
+  assert.equal(tracker.speechUtterances.length, 0);
+  assert.equal(tracker.oscillatorStarts.length, 1);
+  assert.equal(tracker.oscillatorStarts[0].frequency, 466.16);
+  assert.ok(tracker.panners.some((panner) => panner.pan.value === -1));
   tracker.mounted.destroy();
 });
 
@@ -760,6 +919,14 @@ test('runtime row-complete Tones sounds both players exactly once per tracker ro
       `${lane.id} must receive one tone for every visual line`,
     );
   }
+  assert.equal(
+    tracker.panners.filter((panner) => panner.pan.value === -1).length,
+    EXPECTED_PAIRS.length,
+  );
+  assert.equal(
+    tracker.panners.filter((panner) => panner.pan.value === 1).length,
+    EXPECTED_PAIRS.length,
+  );
   tracker.mounted.destroy();
 });
 
@@ -803,8 +970,8 @@ test('render tools stage atomic outputs beside their destinations and provide fo
   const frames = fs.readFileSync(path.join(ROOT, 'tools/render-story-frames.py'), 'utf8');
   assert.match(mixer, /mkdtempSync\(path\.join\(path\.dirname\(out\),/);
   assert.match(reel, /mkdtempSync\(path\.join\(path\.dirname\(out\),/);
-  assert.match(mixer, /deriveRowCompleteSchedule\(score, voicePack\)/);
-  assert.match(reel, /deriveRowCompleteSchedule\(score, voicePack\)/);
+  assert.match(mixer, /deriveRowCompleteSchedule\(score, selectedVoice\)/);
+  assert.match(reel, /deriveRowCompleteSchedule\(score, selectedVoice\)/);
   assert.match(frames, /ImageFont\.load_default/);
   assert.match(frames, /DejaVuSerif/);
 });
@@ -856,6 +1023,8 @@ test('mixer timeline clips word boundaries and omits events after a requested du
         toolFile,
         '--score',
         SCORE_ID,
+        '--voice-config',
+        'subtle',
         '--out',
         'out/mix.wav',
         '--timeline-out',
@@ -872,6 +1041,7 @@ test('mixer timeline clips word boundaries and omits events after a requested du
     const output = `${result.stdout || ''}\n${result.stderr || ''}`;
     assert.equal(result.status, 0, output);
     const timeline = JSON.parse(fs.readFileSync(timelineOut, 'utf8'));
+    assert.equal(timeline.voiceConfiguration, 'subtle');
     assert.ok(timeline.events.length > 0);
     for (const event of timeline.events) {
       for (const word of event.words) {
@@ -882,8 +1052,79 @@ test('mixer timeline clips word boundaries and omits events after a requested du
   });
 });
 
-test('voice generation preserves legacy playback and cannot publish failed renders', () => {
+test('mixer filter graph hard-routes Lady Macbeth left and Macbeth right', () => {
+  withCliSandbox('mix-score-audio.mjs', ({ sandboxRoot, toolFile }) => {
+    const bin = path.join(sandboxRoot, 'bin');
+    fs.mkdirSync(bin, { recursive: true });
+    const ffmpeg = path.join(bin, 'ffmpeg');
+    fs.writeFileSync(
+      ffmpeg,
+      '#!/bin/sh\nprintf "%s\\n" "$@" > "$ARG_LOG"\nfor output do :; done\n: > "$output"\n',
+    );
+    fs.chmodSync(ffmpeg, 0o755);
+    const argumentLog = path.join(sandboxRoot, 'ffmpeg-args.txt');
+    const result = spawnSync(
+      process.execPath,
+      [toolFile, '--score', SCORE_ID, '--voice-config', 'separated', '--out', 'out/mix.wav'],
+      {
+        cwd: sandboxRoot,
+        encoding: 'utf8',
+        env: { ...process.env, PATH: bin, ARG_LOG: argumentLog },
+      },
+    );
+    const output = `${result.stdout || ''}\n${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    const filterGraph = fs.readFileSync(argumentLog, 'utf8');
+    assert.match(filterGraph, /pan=stereo\|c0=1\*c0\|c1=0\*c0/);
+    assert.match(filterGraph, /pan=stereo\|c0=0\*c0\|c1=1\*c0/);
+  });
+});
+
+for (const tool of ['mix-score-audio.mjs', 'render-story-reel.mjs']) {
+  test(`${tool} rejects an unknown voice configuration before output creation`, () => {
+    withCliSandbox(tool, ({ sandboxRoot, toolFile, artFile, audioFile }) => {
+      const outputDirectory = path.join(sandboxRoot, 'uncreated-output');
+      const args =
+        tool === 'mix-score-audio.mjs'
+          ? [
+              toolFile,
+              '--score',
+              SCORE_ID,
+              '--voice-config',
+              'unknown',
+              '--out',
+              path.join(outputDirectory, 'mix.wav'),
+            ]
+          : [
+              toolFile,
+              '--score',
+              SCORE_ID,
+              '--voice-config',
+              'unknown',
+              '--art',
+              artFile,
+              '--audio',
+              audioFile,
+              '--out',
+              path.join(outputDirectory, 'reel.mp4'),
+            ];
+      const result = spawnSync(process.execPath, args, {
+        cwd: sandboxRoot,
+        encoding: 'utf8',
+        env: { ...process.env, PATH: '' },
+      });
+      const output = `${result.stdout || ''}\n${result.stderr || ''}`;
+      assert.notEqual(result.status, 0, output);
+      assert.match(output, /Unknown voice configuration "unknown"/);
+      assert.equal(fs.existsSync(outputDirectory), false);
+      assert.doesNotMatch(output, /ffmpeg|ffprobe/i);
+    });
+  });
+}
+
+test('voice generation propagates pitch, keys caches by every treatment, and publishes atomically', () => {
   const renderer = fs.readFileSync(path.join(ROOT, 'tools/render-voices.mjs'), 'utf8');
+  const edgeRenderer = fs.readFileSync(path.join(ROOT, 'tools/render-edge-tts.py'), 'utf8');
   assert.match(renderer, /const canImportEdgeTts = \(\) =>/);
   assert.match(renderer, /execFileSync\(PYTHON, \['-c', 'import edge_tts'\]/);
   assert.match(
@@ -892,9 +1133,130 @@ test('voice generation preserves legacy playback and cannot publish failed rende
   );
   assert.match(renderer, /timings\[key\] = rendered\.timing/);
   assert.match(renderer, /`--rate=\$\{rate\}`/);
-  assert.doesNotMatch(renderer, /targetSeconds|atempo=/);
-  assert.match(renderer, /if \(failures > 0 \|\| clipCount === 0\)/);
+  assert.match(renderer, /`--pitch=\$\{pitch\}`/);
+  assert.match(
+    renderer,
+    /`\$\{voice\}\|\$\{rate\}\|\$\{pitch\}\|\$\{transposeSemitones\}\|\$\{text\}`/,
+  );
+  assert.match(edgeRenderer, /pitch=args\.pitch/);
+  assert.match(edgeRenderer, /"transposeSemitones": 0/);
+  assert.match(renderer, /if \(failures > 0 \|\| expectedPerConfiguration === 0 \|\| incomplete\)/);
+  assert.match(renderer, /var configurations =/);
+  assert.match(renderer, /clips: configurations\[/);
   assert.match(renderer, /fs\.writeFileSync\(pendingOut,[\s\S]*?fs\.renameSync\(pendingOut, out\)/);
+});
+
+test('a failed multi-configuration render leaves the existing tracked pack byte-identical', () => {
+  const sandboxRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-render-atomic-test-'));
+  try {
+    const toolFile = copyIntoSandbox(sandboxRoot, 'tools/render-voices.mjs');
+    copyIntoSandbox(sandboxRoot, 'tools/pitch-preserving-transpose.mjs');
+    copyIntoSandbox(sandboxRoot, SCORE_RELATIVE);
+    const voiceFile = path.join(sandboxRoot, VOICE_RELATIVE);
+    fs.mkdirSync(path.dirname(voiceFile), { recursive: true });
+    const sentinel = Buffer.from('existing generated pack must survive');
+    fs.writeFileSync(voiceFile, sentinel);
+    const python = path.join(sandboxRoot, 'tools/.venv/bin/python');
+    fs.mkdirSync(path.dirname(python), { recursive: true });
+    fs.writeFileSync(
+      python,
+      `#!${process.execPath}
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+if (args[0] === '-c') process.exit(0);
+if (args.includes('--pitch=+35Hz')) process.exit(7);
+const value = (name) => args[args.indexOf(name) + 1];
+const media = value('--media-out');
+const timing = value('--timing-out');
+fs.mkdirSync(require('node:path').dirname(media), { recursive: true });
+fs.writeFileSync(media, 'synthetic-invalid-mp3');
+fs.writeFileSync(timing, JSON.stringify({ voice: value('--voice'), rate: args.find((arg) => arg.startsWith('--rate='))?.slice(7), pitch: args.find((arg) => arg.startsWith('--pitch='))?.slice(8), transposeSemitones: 0, text: value('--text'), duration: 0.2, words: [{ text: value('--text'), start: 0, end: 0.2 }] }));
+`,
+    );
+    fs.chmodSync(python, 0o755);
+    const result = spawnSync(process.execPath, [toolFile, '--score', SCORE_ID], {
+      cwd: sandboxRoot,
+      encoding: 'utf8',
+    });
+    const output = `${result.stdout || ''}\n${result.stderr || ''}`;
+    assert.notEqual(result.status, 0, output);
+    assert.match(output, /refusing to replace its generated pack/);
+    assert.deepEqual(fs.readFileSync(voiceFile), sentinel);
+  } finally {
+    fs.rmSync(sandboxRoot, { recursive: true, force: true });
+  }
+});
+
+test('octave DSP shifts a synthetic tone by six semitones while preserving duration', () => {
+  const sandboxRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'transpose-dsp-test-'));
+  try {
+    const input = path.join(sandboxRoot, 'input.wav');
+    const generated = spawnSync(
+      'ffmpeg',
+      [
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-f',
+        'lavfi',
+        '-i',
+        'sine=frequency=440:duration=1.5',
+        '-ar',
+        '48000',
+        '-ac',
+        '1',
+        input,
+      ],
+      { encoding: 'utf8' },
+    );
+    assert.equal(generated.status, 0, generated.stderr);
+    const before = probeAudio(input);
+    const measureFrequency = (file) => {
+      const decoded = spawnSync(
+        'ffmpeg',
+        [
+          '-hide_banner',
+          '-loglevel',
+          'error',
+          '-i',
+          file,
+          '-f',
+          'f32le',
+          '-acodec',
+          'pcm_f32le',
+          '-ar',
+          '48000',
+          '-ac',
+          '1',
+          'pipe:1',
+        ],
+        { encoding: null, maxBuffer: 16 * 1024 * 1024 },
+      );
+      assert.equal(decoded.status, 0, decoded.stderr?.toString());
+      const samples = new Float32Array(
+        decoded.stdout.buffer,
+        decoded.stdout.byteOffset,
+        Math.floor(decoded.stdout.byteLength / 4),
+      );
+      const start = Math.floor(0.1 * 48000);
+      let crossings = 0;
+      for (let index = start + 1; index < samples.length; index += 1) {
+        if (samples[index - 1] <= 0 && samples[index] > 0) crossings += 1;
+      }
+      return crossings / ((samples.length - start) / 48000);
+    };
+    for (const semitones of [6, -6]) {
+      const output = path.join(sandboxRoot, `${semitones}.wav`);
+      const result = transposeAudioDurationPreserving(input, output, semitones);
+      const after = probeAudio(output);
+      const expectedRatio = 2 ** (semitones / 12);
+      assert.ok(Math.abs(after.duration - before.duration) <= result.tolerance);
+      assert.ok(Math.abs(measureFrequency(output) / 440 - expectedRatio) < 0.01);
+      assert.equal(result.filter, transposeFilter(48000, semitones).filter);
+    }
+  } finally {
+    fs.rmSync(sandboxRoot, { recursive: true, force: true });
+  }
 });
 
 for (const tool of ['mix-score-audio.mjs', 'render-story-reel.mjs']) {

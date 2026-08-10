@@ -15,6 +15,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 
+import { selectVoicePackConfiguration } from '../apps/web/src/lib/voiceConfigurations.js';
 import { clipKey, deriveRowCompleteSchedule } from './row-complete-schedule.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -27,7 +28,7 @@ const PIP = path.join(VENV, VENV_BIN, process.platform === 'win32' ? 'pip.exe' :
 const FRAME_RENDERER = path.join(ROOT, 'tools/render-story-frames.py');
 
 const usage = `Usage:
-  node tools/render-story-reel.mjs --score <id> --art <image> --audio <mix.wav> --out <reel.mp4> [--force]
+  node tools/render-story-reel.mjs --score <id> --art <image> --audio <mix.wav> --out <reel.mp4> [--voice-config <id>] [--force]
 `;
 
 function fail(message) {
@@ -43,10 +44,12 @@ function parseArgs(argv) {
       options.force = true;
       continue;
     }
-    if (!['--score', '--art', '--audio', '--out'].includes(arg)) fail(`Unknown option: ${arg}`);
+    if (!['--score', '--art', '--audio', '--out', '--voice-config'].includes(arg)) {
+      fail(`Unknown option: ${arg}`);
+    }
     const value = argv[index + 1];
     if (!value || value.startsWith('--')) fail(`${arg} requires a value`);
-    options[arg.slice(2)] = value;
+    options[arg.slice(2).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = value;
     index += 1;
   }
   return options;
@@ -134,7 +137,12 @@ function main() {
   const score = scores?.[options.score];
   const voicePack = voices?.[options.score];
   if (!score?.visualPairs || score.lanes.length !== 2) fail('Story reels require a two-lane score with visualPairs.');
-  if (!voicePack?.timings) fail('Voice pack has no word timings. Run node tools/render-voices.mjs first.');
+  const selectedVoice = selectVoicePackConfiguration(
+    score,
+    voicePack,
+    options.voiceConfig,
+    { strict: true },
+  );
 
   const art = projectPath(options.art);
   const audio = projectPath(options.audio);
@@ -149,7 +157,7 @@ function main() {
   if (fs.existsSync(out) && !options.force) fail(`Refusing to replace ${path.relative(ROOT, out)} without --force.`);
   fs.mkdirSync(path.dirname(out), { recursive: true });
 
-  const rowCompleteSchedule = deriveRowCompleteSchedule(score, voicePack);
+  const rowCompleteSchedule = deriveRowCompleteSchedule(score, selectedVoice);
   const duration = rowCompleteSchedule?.duration ?? score.total / score.tempo;
   const lanes = rowCompleteSchedule
     ? score.lanes.map((lane) => ({
@@ -166,7 +174,7 @@ function main() {
         const sourceEvent = score.events.find(
           (event) => event.lane === lane.id && event.speechText && !event.silent,
         );
-        const timing = sourceEvent ? voicePack.timings[clipKey(sourceEvent)] : null;
+        const timing = sourceEvent ? selectedVoice.timings[clipKey(sourceEvent)] : null;
         if (!timing) fail(`Missing timing for lane ${lane.id}`);
         return {
           id: lane.id,
@@ -182,6 +190,7 @@ function main() {
   const spec = {
     duration,
     fps: 30,
+    voiceConfiguration: selectedVoice.id,
     lanes,
     credit: 'poem @two.be  ·  artwork @amaanjahangir  ·  audio remix',
   };

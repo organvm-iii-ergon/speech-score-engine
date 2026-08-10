@@ -52,8 +52,11 @@
         var wanted = params.get('score');
         var id = wanted && SCORES[wanted] ? wanted : SCORES['philip-glass'] ? 'philip-glass' : Object.keys(SCORES)[0];
         var voices = (window.SSE_VOICES || {})[id] || {};
+        var voiceConfig = params.get('voiceConfig');
         window.SSEEngine.mount(document.getElementById('root'), {
           score: SCORES[id],
+          voicePack: voices,
+          voiceConfig: voiceConfig,
           clips: voices.clips || null,
           timings: voices.timings || null,
           scores: Object.values(SCORES),

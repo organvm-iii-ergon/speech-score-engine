@@ -49,11 +49,18 @@ export interface Score {
   byline?: string;
   caption?: string;
   playback?: 'row-complete';
+  voiceConfigurations?: Record<string, Record<string, VoiceTreatment>>;
+  defaultVoiceConfiguration?: string;
   tempo?: number;
   lanes: Lane[];
   sections?: Record<string, [number, number]>;
   total: number;
   events: ScoreEvent[];
+}
+
+export interface VoiceTreatment {
+  pitch?: string;
+  transposeSemitones?: number;
 }
 
 export type ClipMap = Record<string, string>;
@@ -69,25 +76,38 @@ export interface WordTiming {
 export interface ClipTiming {
   voice: string;
   rate: string;
+  pitch?: string;
+  transposeSemitones?: number;
   text: string;
   duration: number;
   words: WordTiming[];
+}
+
+export interface VoicePackConfiguration {
+  count?: number;
+  clips: ClipMap;
+  timings: Record<string, ClipTiming>;
 }
 
 export interface VoicePack {
   source?: string;
   format?: string;
   count?: number;
+  totalCount?: number;
   clips: ClipMap;
   timings?: Record<string, ClipTiming>;
+  configurations?: Record<string, VoicePackConfiguration>;
 }
 
 export interface MountOptions {
   score: Score;
   clips: ClipMap | null;
   timings?: Record<string, ClipTiming> | null;
+  voicePack?: VoicePack | null;
+  voiceConfig?: string | null;
   scores: Score[];
   onPick?: (id: string) => void;
+  onVoiceConfig?: (id: string) => void;
 }
 
 export interface TrackerHandle {
