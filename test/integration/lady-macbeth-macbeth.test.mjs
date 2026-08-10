@@ -9,6 +9,9 @@ import vm from 'node:vm';
 
 import {
   deriveScoreTotal,
+  duplicateContinuousPassageEvent,
+  moveContinuousPassageEvent,
+  removeContinuousPassageEvent,
   renameContinuousPassageLine,
 } from '../../apps/web/src/lib/scoreEditing.js';
 import { deriveRowCompleteSchedule } from '../../tools/row-complete-schedule.mjs';
@@ -108,6 +111,37 @@ function writeLegacyNoTimingFixture(sandboxRoot) {
 `,
   );
   return scoreId;
+}
+
+function writeEditorJsonFixture(sandboxRoot) {
+  const scoreId = 'editor-json';
+  const scorePath = path.join(sandboxRoot, 'apps/web/public/prototypes/scores', `${scoreId}.json`);
+  const voicePath = path.join(sandboxRoot, 'apps/web/public/prototypes/voices', `${scoreId}.js`);
+  fs.mkdirSync(path.dirname(scorePath), { recursive: true });
+  fs.mkdirSync(path.dirname(voicePath), { recursive: true });
+  fs.writeFileSync(
+    scorePath,
+    JSON.stringify({
+      id: scoreId,
+      title: 'Editor JSON',
+      tempo: 1,
+      total: 1,
+      lanes: [{ id: 'A', performer: 'ai', pan: 0 }],
+      events: [{ row: 0, lane: 'A', text: 'editor source' }],
+    }),
+  );
+  fs.writeFileSync(
+    voicePath,
+    `(() => {
+  const root = typeof window !== 'undefined' ? window : globalThis;
+  root.SSE_VOICES = root.SSE_VOICES || {};
+  root.SSE_VOICES[${JSON.stringify(scoreId)}] = {
+    clips: { 'A|editor source': 'ZHVtbXk=' },
+  };
+})();
+`,
+  );
+  return { scoreId, scorePath };
 }
 
 function fakeClassList() {
@@ -286,7 +320,12 @@ function mountTimedTracker({ deferDecode = false } = {}) {
   const silentButton = fakeElement('button');
   silentButton.dataset.m = 'off';
   sound.children.push(voiceButton, toneButton, silentButton);
-  createUi('.t-mode');
+  const mode = createUi('.t-mode');
+  const clockButton = fakeElement('button');
+  clockButton.dataset.mode = 'clock';
+  const cueButton = fakeElement('button');
+  cueButton.dataset.mode = 'cue';
+  mode.children.push(clockButton, cueButton);
   createUi('.t-countin', 'button');
   createUi('.t-tempo').value = String(score.tempo);
   createUi('.t-count');
@@ -339,6 +378,7 @@ function mountTimedTracker({ deferDecode = false } = {}) {
     starts,
     toneButton,
     ui,
+    cueButton,
     voiceButton,
   };
 }
@@ -503,6 +543,68 @@ test('editing a continuous-passage continuation rebuilds its source passage in v
   assert.equal(events[0].speechText, 'first second third', 'helper must not mutate imported state');
 });
 
+test('continuous-passage structural edits preserve one valid source per remaining lane', () => {
+  const events = [
+    { id: 'trigger', lane: 'A', text: 'first', speechText: 'first second third', start: 0 },
+    { id: 'middle', lane: 'A', text: 'second', silent: true, start: 1 },
+    { id: 'last', lane: 'A', text: 'third', silent: true, start: 2 },
+  ];
+
+  const duplicate = duplicateContinuousPassageEvent(events[0], 'copy', 1);
+  assert.equal(
+    duplicate.speechText,
+    undefined,
+    'a duplicate must not create a second passage source',
+  );
+  assert.equal(duplicate.silent, undefined, 'a duplicate must remain an ordinary audible clip');
+
+  const deleted = removeContinuousPassageEvent(events, 'trigger');
+  assert.deepEqual(deleted, [
+    {
+      id: 'middle',
+      lane: 'A',
+      text: 'second',
+      silent: false,
+      speechText: 'second third',
+      start: 1,
+    },
+    { id: 'last', lane: 'A', text: 'third', silent: true, start: 2 },
+  ]);
+
+  const recast = moveContinuousPassageEvent(events, 'trigger', 'B');
+  assert.deepEqual(
+    recast.find((event) => event.id === 'trigger'),
+    {
+      id: 'trigger',
+      lane: 'B',
+      text: 'first',
+      start: 0,
+    },
+  );
+  assert.deepEqual(
+    recast.find((event) => event.id === 'middle'),
+    {
+      id: 'middle',
+      lane: 'A',
+      text: 'second',
+      silent: false,
+      speechText: 'second third',
+      start: 1,
+    },
+  );
+});
+
+test('the editor preserves row-complete playback metadata through load and export', () => {
+  const editor = fs.readFileSync(
+    path.join(ROOT, 'apps/web/src/components/EditorClient.tsx'),
+    'utf8',
+  );
+  assert.match(editor, /setPlayback\(sc\.playback\)/);
+  assert.match(editor, /\.\.\.\(playback \? \{ playback \} : \{\}\)/);
+  assert.match(editor, /moveContinuousPassageEvent\(prev, d\.id, lane\)/);
+  assert.match(editor, /removeContinuousPassageEvent\(prev, selected\)/);
+});
+
 test('missing score totals derive a finite extent that covers their clips', () => {
   assert.equal(
     deriveScoreTotal(undefined, [
@@ -573,6 +675,16 @@ test('timed transport preserves section, tempo, monitor, and cancellation semant
   assert.match(engine, /destroyed = true;\s*cancelPendingPlay\(\)/);
   assert.match(engine, /\(ev\.trimStart \|\| 0\) \+ \(ev\.sectionTrimStart \|\| 0\)/);
   assert.match(engine, /const sourceEnd = untrimmedEnd - Math\.max\(0, ev\.trimEnd \|\| 0\)/);
+  assert.match(
+    engine,
+    /if \(ev\.warp && beatsPerSec > 0 && typeof ev\.transportRate !== 'number'\)/,
+  );
+  assert.match(engine, /if \(!visibleLaneEvents\.length\) continue/);
+  assert.match(engine, /filter\(\(ev\) => ev === sourceEvent \|\| ev\.silent\)/);
+  assert.match(engine, /for \(const ev of audible\)/);
+  assert.match(engine, /const missing = \[\]/);
+  assert.match(engine, /if \(cueAdvancePending\) return/);
+  assert.match(engine, /cueAdvancePending = true;[\s\S]*?finally \{\s*cueAdvancePending = false/);
 
   const silentBranch = engine.match(/if \(m === 'off'\) \{([\s\S]*?)\n\s*return;\n\s*\}/)?.[1];
   assert.ok(silentBranch, 'Silent-mode branch must exist');
@@ -672,6 +784,19 @@ test('runtime deferred voice decode cannot resume after the user leaves Voices',
   tracker.mounted.destroy();
 });
 
+test('Live cue ignores repeated strikes while the first voice-pack decode is pending', async () => {
+  const tracker = mountTimedTracker({ deferDecode: true });
+  await emitTrackerClick(tracker.ui.get('.t-mode'), tracker.cueButton);
+  tracker.ui.get('.t-play').emit('click');
+  tracker.ui.get('.t-play').emit('click');
+  await flushTrackerWork();
+  assert.equal(tracker.pendingDecodes.length, score.events.length);
+  for (const resolve of tracker.pendingDecodes) resolve();
+  await flushTrackerWork();
+  assert.equal(tracker.starts.length, score.lanes.length, 'only the first tracker row may advance');
+  tracker.mounted.destroy();
+});
+
 test('render tools stage atomic outputs beside their destinations and provide font fallbacks', () => {
   const mixer = fs.readFileSync(path.join(ROOT, 'tools/mix-score-audio.mjs'), 'utf8');
   const reel = fs.readFileSync(path.join(ROOT, 'tools/render-story-reel.mjs'), 'utf8');
@@ -682,6 +807,79 @@ test('render tools stage atomic outputs beside their destinations and provide fo
   assert.match(reel, /deriveRowCompleteSchedule\(score, voicePack\)/);
   assert.match(frames, /ImageFont\.load_default/);
   assert.match(frames, /DejaVuSerif/);
+});
+
+test('render tools resolve their virtualenv interpreter on Windows and POSIX hosts', () => {
+  const renderer = fs.readFileSync(path.join(ROOT, 'tools/render-voices.mjs'), 'utf8');
+  const reel = fs.readFileSync(path.join(ROOT, 'tools/render-story-reel.mjs'), 'utf8');
+  for (const source of [renderer, reel]) {
+    assert.match(source, /VENV_BIN = process\.platform === 'win32' \? 'Scripts' : 'bin'/);
+    assert.match(source, /process\.platform === 'win32' \? 'python\.exe' : 'python'/);
+  }
+  assert.match(
+    renderer,
+    /BOOTSTRAP_PYTHON = process\.platform === 'win32' \? 'python' : 'python3'/,
+  );
+  assert.match(reel, /process\.platform === 'win32' \? 'pip\.exe' : 'pip'/);
+});
+
+test('mixer accepts editor-exported JSON scores with the same collision safety as script scores', () => {
+  withCliSandbox('mix-score-audio.mjs', ({ sandboxRoot, toolFile }) => {
+    const { scoreId, scorePath } = writeEditorJsonFixture(sandboxRoot);
+    const result = spawnSync(
+      process.execPath,
+      [toolFile, '--score', scoreId, '--out', scorePath, '--force'],
+      {
+        cwd: sandboxRoot,
+        encoding: 'utf8',
+        env: { ...process.env, PATH: '' },
+      },
+    );
+    const output = `${result.stdout || ''}\n${result.stderr || ''}`;
+    assert.notEqual(result.status, 0, output);
+    assert.match(output, /--out must be different from implicit score\/voice source paths\./);
+    assert.doesNotMatch(output, /Missing score file|ffmpeg/i);
+  });
+});
+
+test('mixer timeline clips word boundaries and omits events after a requested duration', () => {
+  withCliSandbox('mix-score-audio.mjs', ({ sandboxRoot, toolFile }) => {
+    const bin = path.join(sandboxRoot, 'bin');
+    fs.mkdirSync(bin, { recursive: true });
+    const ffmpeg = path.join(bin, 'ffmpeg');
+    fs.writeFileSync(ffmpeg, '#!/bin/sh\nfor output do :; done\n: > "$output"\n');
+    fs.chmodSync(ffmpeg, 0o755);
+    const timelineOut = path.join(sandboxRoot, 'out', 'timeline.json');
+    const result = spawnSync(
+      process.execPath,
+      [
+        toolFile,
+        '--score',
+        SCORE_ID,
+        '--out',
+        'out/mix.wav',
+        '--timeline-out',
+        timelineOut,
+        '--duration',
+        '0.2',
+      ],
+      {
+        cwd: sandboxRoot,
+        encoding: 'utf8',
+        env: { ...process.env, PATH: bin },
+      },
+    );
+    const output = `${result.stdout || ''}\n${result.stderr || ''}`;
+    assert.equal(result.status, 0, output);
+    const timeline = JSON.parse(fs.readFileSync(timelineOut, 'utf8'));
+    assert.ok(timeline.events.length > 0);
+    for (const event of timeline.events) {
+      for (const word of event.words) {
+        assert.ok(word.start < 0.2, `${word.text} begins after the finished mix`);
+        assert.ok(word.end <= 0.2, `${word.text} extends past the finished mix`);
+      }
+    }
+  });
 });
 
 test('voice generation preserves legacy playback and cannot publish failed renders', () => {

@@ -352,7 +352,10 @@
         typeof ev.transportRate === 'number' && ev.transportRate > 0 ? ev.transportRate : 1;
       let rate = spec.rate * transportRate * (deterministic ? 1 : rand(0.997, 1.003));
       let outDur = srcDur / rate; // wall-clock output seconds (place-and-play)
-      if (ev.warp && beatsPerSec > 0) {
+      // A continuous passage owns a clip-derived visual clock. Its transportRate keeps the
+      // sound in phase with that clock, so repitch Warp is unavailable for that source rather
+      // than replacing the timed rate with its unrelated one-beat grid calculation.
+      if (ev.warp && beatsPerSec > 0 && typeof ev.transportRate !== 'number') {
         const target = Math.max(0.05, evBeats(ev) / beatsPerSec);
         rate = Math.min(8, Math.max(0.1, srcDur / target));
         outDur = target;
@@ -429,9 +432,10 @@
           if (SAMP.ready) {
             const base = ctx.currentTime + 0.015;
             let any = false;
-            // Start every eligible pre-rendered lane and gate it independently. A mute/solo change
-            // during a continuous passage can then take effect immediately without losing phase.
-            for (const ev of eligible) {
+            const missing = [];
+            // Start only audible pre-rendered lanes. A muted matching clip must not prevent an
+            // edited audible line from using the Web Speech fallback.
+            for (const ev of audible) {
               const key = `${ev.lane}|${ev.speechText || ev.text}`;
               const stagger = TIMINGS?.[key] ? 0 : rand(0, 0.028);
               const scheduled = Math.max(
@@ -439,9 +443,20 @@
                 typeof ev.scheduleSeconds === 'number' ? ev.scheduleSeconds : 0,
               );
               if (playSample(ev, base + scheduled + stagger)) any = true;
+              else missing.push(ev);
             }
-            if (any) return;
-            // a clip pack is loaded but none matched (e.g. text edited in the editor) -> speak it
+            // A pack can match only some audible lines after an edit. Fall back only for the
+            // unmatched audible subset; never let a silent lane consume that decision.
+            if (missing.length && synth && speak(missing)) return;
+            if (any) {
+              // Web Speech is optional. Keep the final Web Audio fallback audible for only the
+              // unmatched lines rather than adding duplicate tones beneath matched clips.
+              if (missing.length && ensureCtx() && ctx) {
+                for (const ev of missing) tone(ev.lane, ctx.currentTime);
+              }
+              return;
+            }
+            // a clip pack is loaded but no audible clip matched (e.g. text edited in the editor)
             if (audible.length && synth && speak(audible)) return;
           } else {
             loadSamples();
@@ -520,13 +535,21 @@
       if (!TIMINGS || !EV.some((ev) => ev.speechText)) return null;
       const allCues = [];
       for (const lane of CH) {
+        const visibleLaneEvents = EV.filter((ev) => ev.lane === lane && ev.el);
+        // Adding an unused editor lane or an ordinary clip must not discard timing for a populated
+        // continuous passage. A lane that retains silent continuations without a source is corrupt.
+        if (!visibleLaneEvents.length) continue;
         const sourceEvent = EV.find((ev) => ev.lane === lane && ev.speechText && !ev.silent);
+        if (!sourceEvent) {
+          if (visibleLaneEvents.some((ev) => ev.silent)) return null;
+          continue;
+        }
+        const laneEvents = visibleLaneEvents
+          .filter((ev) => ev === sourceEvent || ev.silent)
+          .sort((a, b) => a.tick - b.tick);
         const timing = sourceEvent ? TIMINGS[`${lane}|${sourceEvent.speechText}`] : null;
         if (!Array.isArray(timing?.words)) return null;
         const words = timing.words;
-        const laneEvents = EV.filter((ev) => ev.lane === lane && ev.el).sort(
-          (a, b) => a.tick - b.tick,
-        );
         let cursor = 0;
         const laneCues = [];
         for (const ev of laneEvents) {
@@ -611,6 +634,7 @@
     // L5 — live human+AI performance
     let cue = false; // cue mode: a human drives the pace (Space advances), AI answers on its rows
     let cued = false; // has the first line been struck since (re)entering cue mode
+    let cueAdvancePending = false; // one input may wait for decoding; later strikes must not skip
     let countin = false; // 3·2·1 pre-roll before a metronome performance
     let counting = false;
     let countTimer = null;
@@ -1087,23 +1111,29 @@
     };
     // Each cue strikes the NEXT LINE (not the next empty grid-beat) — the human drives line by line.
     const cueAdvance = async () => {
+      if (cueAdvancePending) return;
+      cueAdvancePending = true;
       const generation = playGeneration;
-      await primeAudio();
-      if (destroyed || !cue || generation !== playGeneration) return;
-      const rows = cueRows();
-      if (!rows.length) return;
-      if (!cued) {
-        cued = true;
-        clearPerformed();
-        advance(rows[0]);
-        return;
-      }
-      const next = rows.find((r) => r > currentRow);
-      if (next === undefined) {
-        clearPerformed();
-        advance(rows[0]); // wrap — loop the passage for drilling
-      } else {
-        advance(next);
+      try {
+        await primeAudio();
+        if (destroyed || !cue || generation !== playGeneration) return;
+        const rows = cueRows();
+        if (!rows.length) return;
+        if (!cued) {
+          cued = true;
+          clearPerformed();
+          advance(rows[0]);
+          return;
+        }
+        const next = rows.find((r) => r > currentRow);
+        if (next === undefined) {
+          clearPerformed();
+          advance(rows[0]); // wrap — loop the passage for drilling
+        } else {
+          advance(next);
+        }
+      } finally {
+        cueAdvancePending = false;
       }
     };
     // Step BACK to the previous line — rehearsal correction / footswitch back-pedal.
