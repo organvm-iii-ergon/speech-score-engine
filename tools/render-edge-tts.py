@@ -18,6 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--voice", required=True)
     parser.add_argument("--rate", default="+0%")
+    parser.add_argument("--pitch", default="+0Hz")
     parser.add_argument("--text", required=True)
     parser.add_argument("--media-out", type=Path, required=True)
     parser.add_argument("--timing-out", type=Path, required=True)
@@ -34,6 +35,7 @@ async def render(args: argparse.Namespace) -> None:
         args.text,
         args.voice,
         rate=args.rate,
+        pitch=args.pitch,
         boundary="WordBoundary",
     )
 
@@ -62,6 +64,8 @@ async def render(args: argparse.Namespace) -> None:
         payload = {
             "voice": args.voice,
             "rate": args.rate,
+            "pitch": args.pitch,
+            "transposeSemitones": 0,
             "text": args.text,
             "duration": words[-1]["end"],
             "words": words,

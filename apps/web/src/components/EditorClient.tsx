@@ -11,7 +11,11 @@ import {
 } from '@/lib/scoreEditing';
 import { ENGINE_SCRIPT, ENGINE_STYLES, SCORE_SCRIPTS } from '@/lib/scoreScripts';
 import { VOICE_CATALOG } from '@/lib/voiceCatalog';
-import type { ClipTiming, Lane, Score } from '@/types/sse';
+import {
+  resolveVoiceConfigurationId,
+  selectVoicePackConfiguration,
+} from '@/lib/voiceConfigurations';
+import type { ClipTiming, Lane, Score, VoicePack } from '@/types/sse';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 // The arrangement editor — "Ableton for voice", clip-view "for words". A horizontal timeline: lanes
@@ -125,6 +129,11 @@ export function EditorClient() {
   const [selected, setSelected] = useState<string | null>(null);
   const [registry, setRegistry] = useState<Record<string, Score>>({});
   const [performing, setPerforming] = useState(false);
+  const [voiceConfigurations, setVoiceConfigurations] = useState<
+    NonNullable<Score['voiceConfigurations']>
+  >({});
+  const [selectedVoiceConfiguration, setSelectedVoiceConfiguration] = useState<string | null>(null);
+  const [voicePack, setVoicePack] = useState<VoicePack | null>(null);
   const [clips, setClips] = useState<Record<string, string> | null>(null); // neural pack for L6 craft
   const [timings, setTimings] = useState<Record<string, ClipTiming> | null>(null);
   const [clipDur, setClipDur] = useState(0);
@@ -167,6 +176,17 @@ export function EditorClient() {
     seq.current = sc.events.length;
     setTempo(sc.tempo ?? 3);
     setPlayback(sc.playback);
+    setVoiceConfigurations(
+      Object.fromEntries(
+        Object.entries(sc.voiceConfigurations || {}).map(([id, lanes]) => [
+          id,
+          Object.fromEntries(
+            Object.entries(lanes).map(([lane, treatment]) => [lane, { ...treatment }]),
+          ),
+        ]),
+      ),
+    );
+    setSelectedVoiceConfiguration(resolveVoiceConfigurationId(sc, sc.defaultVoiceConfiguration));
     setTotal(deriveScoreTotal(sc.total, sc.events));
     setTitle(sc.title);
     setScoreId(sc.id);
@@ -178,6 +198,7 @@ export function EditorClient() {
   useEffect(() => {
     let cancelled = false;
     if (!registry[scoreId]) {
+      setVoicePack(null);
       setClips(null);
       setTimings(null);
       return;
@@ -186,10 +207,22 @@ export function EditorClient() {
       await loadScript(`/prototypes/voices/${scoreId}.js`);
       if (cancelled) return;
       const voicePack = window.SSE_VOICES?.[scoreId];
-      setClips(voicePack?.clips ?? null);
-      setTimings(voicePack?.timings ?? null);
+      setVoicePack(voicePack ?? null);
+      if (!voicePack) {
+        setClips(null);
+        setTimings(null);
+        return;
+      }
+      const selected = selectVoicePackConfiguration(
+        registry[scoreId],
+        voicePack,
+        selectedVoiceConfiguration,
+      );
+      setClips(selected.clips);
+      setTimings(selected.timings);
     })().catch(() => {
       if (!cancelled) {
+        setVoicePack(null);
         setClips(null);
         setTimings(null);
       }
@@ -197,7 +230,7 @@ export function EditorClient() {
     return () => {
       cancelled = true;
     };
-  }, [scoreId, registry]);
+  }, [scoreId, registry, selectedVoiceConfiguration]);
 
   // Load the score registry (for the "start from" picker), and any ?score= starting point.
   useEffect(() => {
@@ -374,6 +407,13 @@ export function EditorClient() {
       short: title,
       title,
       ...(playback ? { playback } : {}),
+      ...(Object.keys(voiceConfigurations).length
+        ? {
+            voiceConfigurations,
+            defaultVoiceConfiguration:
+              selectedVoiceConfiguration || Object.keys(voiceConfigurations)[0],
+          }
+        : {}),
       tempo,
       lanes,
       sections: {},
@@ -401,7 +441,17 @@ export function EditorClient() {
           };
         }),
     };
-  }, [events, lanes, playback, tempo, title, scoreId, total]);
+  }, [
+    events,
+    lanes,
+    playback,
+    tempo,
+    title,
+    scoreId,
+    total,
+    voiceConfigurations,
+    selectedVoiceConfiguration,
+  ]);
 
   const exportJson = () => {
     const score = toScore();
@@ -438,13 +488,24 @@ export function EditorClient() {
       const score = toScore();
       // Perform with the real neural clips when we have them, so audio craft is audible; else the
       // engine falls back to Web Speech (edited/new lines with no rendered clip do too).
-      handle = engine.mount(el, { score, clips, timings, scores: [score] });
+      handle = engine.mount(el, {
+        score,
+        voicePack,
+        voiceConfig: selectedVoiceConfiguration,
+        clips,
+        timings,
+        scores: [score],
+        onVoiceConfig: (id) => {
+          setPerforming(false);
+          setSelectedVoiceConfiguration(id);
+        },
+      });
     })().catch((err) => console.error(err));
     return () => {
       cancelled = true;
       if (handle) handle.destroy();
     };
-  }, [performing, toScore, clips, timings]);
+  }, [performing, toScore, voicePack, selectedVoiceConfiguration, clips, timings]);
 
   const selectedEv = events.find((e) => e.id === selected) ?? null;
   const selLane = selectedEv ? (lanes.find((l) => l.id === selectedEv.lane) ?? null) : null;
@@ -594,6 +655,29 @@ export function EditorClient() {
         <button type="button" style={btn} onClick={addLane}>
           + Lane
         </button>
+        {Object.keys(voiceConfigurations).length > 0 && (
+          <label style={{ fontSize: 11, color: C.faint }}>
+            Voice treatment{' '}
+            <select
+              aria-label="Voice treatment"
+              style={field}
+              value={selectedVoiceConfiguration ?? ''}
+              onChange={(event) => {
+                setPerforming(false);
+                setSelectedVoiceConfiguration(event.target.value);
+              }}
+            >
+              {Object.keys(voiceConfigurations).map((id) => (
+                <option key={id} value={id}>
+                  {id
+                    .split('-')
+                    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+                    .join(' ')}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <select
           aria-label="Start from a score"
           style={field}

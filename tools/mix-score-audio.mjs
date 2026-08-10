@@ -13,6 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 
+import { selectVoicePackConfiguration } from '../apps/web/src/lib/voiceConfigurations.js';
 import { deriveRowCompleteSchedule } from './row-complete-schedule.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -24,6 +25,7 @@ const usage = `Usage:
 
 Options:
   --duration <seconds>  Pad or trim the finished mix to this duration (default: score duration).
+  --voice-config <id>   Select a named score voice configuration (default: score default).
   --timeline-out <path> Write the exact lane/word cue timeline used by the mix as JSON.
   --video <path>        A silent or scratch-audio video to mux with the generated mix.
   --video-out <path>    MP4 destination when --video is supplied (required with --video).
@@ -47,7 +49,17 @@ function parseArgs(argv) {
       options.force = true;
       continue;
     }
-    if (!['--score', '--out', '--duration', '--timeline-out', '--video', '--video-out'].includes(arg)) {
+    if (
+      ![
+        '--score',
+        '--out',
+        '--duration',
+        '--voice-config',
+        '--timeline-out',
+        '--video',
+        '--video-out',
+      ].includes(arg)
+    ) {
       fail(`Unknown option: ${arg}`);
     }
     const value = argv[index + 1];
@@ -166,9 +178,14 @@ function main() {
   const voiceFile = path.join(VOICES_DIR, `${options.score}.js`);
   const voiceSandbox = loadRegistration(voiceFile, 'voice pack');
   const voicePack = voiceSandbox.SSE_VOICES?.[options.score];
-  if (!voicePack?.clips) fail(`Voice pack ${JSON.stringify(options.score)} did not register clips.`);
+  const selectedVoice = selectVoicePackConfiguration(
+    score,
+    voicePack,
+    options.voiceConfig,
+    { strict: true },
+  );
 
-  const rowCompleteSchedule = deriveRowCompleteSchedule(score, voicePack);
+  const rowCompleteSchedule = deriveRowCompleteSchedule(score, selectedVoice);
   const duration =
     options.duration === undefined
       ? (rowCompleteSchedule?.duration ?? scoreSeconds(score))
@@ -217,7 +234,7 @@ function main() {
   if (timelineOut) {
     const missingTiming = events.find(({ event }) => {
       const speechText = event.speechText || event.text;
-      const words = voicePack.timings?.[`${event.lane}|${speechText}`]?.words;
+      const words = selectedVoice.timings?.[`${event.lane}|${speechText}`]?.words;
       return !Array.isArray(words) || words.length === 0;
     });
     if (missingTiming) {
@@ -243,6 +260,7 @@ function main() {
     const inputs = [];
     const timeline = {
       score: score.id,
+      voiceConfiguration: selectedVoice.id,
       duration,
       source: 'Edge-TTS word boundaries from the same stream as each mixed clip',
       events: [],
@@ -250,7 +268,7 @@ function main() {
     for (const [index, { event, lane, startSeconds }] of events.entries()) {
       const speechText = event.speechText || event.text;
       const key = `${event.lane}|${speechText}`;
-      const clip = voicePack.clips[key];
+      const clip = selectedVoice.clips[key];
       if (!clip) {
         fail(`Voice pack is missing ${JSON.stringify(key)}. Run node tools/render-voices.mjs first.`);
       }
@@ -258,7 +276,7 @@ function main() {
       fs.writeFileSync(clipFile, Buffer.from(clip, 'base64'));
       inputs.push('-i', clipFile);
 
-      const clipTiming = voicePack.timings?.[key];
+      const clipTiming = selectedVoice.timings?.[key];
       const words = (clipTiming?.words || [])
         .map((word) => ({
           text: word.text,

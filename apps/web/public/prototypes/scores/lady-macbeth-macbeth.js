@@ -13,7 +13,7 @@
       performer: 'ai',
       voice: 'en-GB-SoniaNeural',
       rate: '+0%',
-      pan: -0.72,
+      pan: -1,
       gain: 0.98,
       align: 'right',
       tone: { f: 466.16, type: 'triangle' },
@@ -25,10 +25,10 @@
       performer: 'ai',
       voice: 'en-GB-RyanNeural',
       rate: '+0%',
-      pan: 0.72,
+      pan: 1,
       gain: 1.0,
       align: 'left',
-      tone: { f: 311.13, type: 'sine' },
+      tone: { f: 233.08, type: 'sine' },
       speech: { pitch: 0.82, rate: 1.0, prefer: ['ryan', 'male'] },
     },
   ];
@@ -53,6 +53,29 @@
     caption:
       'A synchronized two-player tracker: each row advances only when both UK neural voices finish.',
     playback: 'row-complete',
+    voiceConfigurations: {
+      natural: {
+        LADY_MACBETH: { pitch: '+0Hz' },
+        MACBETH: { pitch: '+0Hz' },
+      },
+      subtle: {
+        LADY_MACBETH: { pitch: '+10Hz' },
+        MACBETH: { pitch: '-10Hz' },
+      },
+      separated: {
+        LADY_MACBETH: { pitch: '+20Hz' },
+        MACBETH: { pitch: '-20Hz' },
+      },
+      theatrical: {
+        LADY_MACBETH: { pitch: '+35Hz' },
+        MACBETH: { pitch: '-35Hz' },
+      },
+      'octave-split': {
+        LADY_MACBETH: { transposeSemitones: 6 },
+        MACBETH: { transposeSemitones: -6 },
+      },
+    },
+    defaultVoiceConfiguration: 'separated',
     tempo: 1,
     lanes: LANES,
     sections: {

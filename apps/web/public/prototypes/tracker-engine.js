@@ -21,6 +21,8 @@
     '<div class="caption t-caption"></div>',
     '<div class="transport">',
     '  <div class="trow"><div class="seg t-scores"></div></div>',
+    '  <div class="trow t-voice-config-row"><label class="voice-config">Voice treatment',
+    '    <select class="t-voice-config"></select></label></div>',
     '  <div class="tempo"><label>Tempo</label>',
     '    <input class="t-tempo" type="range" min="1" max="9" step="0.5" /></div>',
     '  <div class="trow">',
@@ -47,14 +49,41 @@
 
   function mount(root, opts) {
     const SC = opts.score;
-    const CLIPS = opts.clips || null;
-    const TIMINGS = opts.timings || null;
+    const VOICE_CONFIG_IDS = Object.keys(SC.voiceConfigurations || {});
+    const requestedVoiceConfig = VOICE_CONFIG_IDS.includes(opts.voiceConfig)
+      ? opts.voiceConfig
+      : null;
+    const VOICE_CONFIG =
+      requestedVoiceConfig ||
+      (VOICE_CONFIG_IDS.includes(SC.defaultVoiceConfiguration)
+        ? SC.defaultVoiceConfiguration
+        : VOICE_CONFIG_IDS[0]) ||
+      null;
+    const configuredPack = VOICE_CONFIG
+      ? opts.voicePack?.configurations?.[VOICE_CONFIG]
+      : opts.voicePack;
+    const defaultAliasPack =
+      VOICE_CONFIG === SC.defaultVoiceConfiguration && opts.voicePack?.clips
+        ? opts.voicePack
+        : null;
+    const activePack = configuredPack || defaultAliasPack;
+    const CLIPS = activePack?.clips || opts.clips || null;
+    const TIMINGS = activePack?.timings || opts.timings || null;
+    const configurationAware = VOICE_CONFIG_IDS.length > 0;
     const ALL = opts.scores || [SC];
     const onPick =
       opts.onPick ||
       ((id) => {
         const p = new URLSearchParams(location.search);
         p.set('score', id);
+        p.delete('voiceConfig');
+        location.search = p.toString();
+      });
+    const onVoiceConfig =
+      opts.onVoiceConfig ||
+      ((id) => {
+        const p = new URLSearchParams(location.search);
+        p.set('voiceConfig', id);
         location.search = p.toString();
       });
 
@@ -247,13 +276,30 @@
       env.gain.exponentialRampToValueAtTime(0.2, when + 0.015);
       env.gain.exponentialRampToValueAtTime(0.0001, when + 0.34);
       osc.connect(env);
-      env.connect(master);
+      let panner = null;
+      if (ctx.createStereoPanner) {
+        panner = ctx.createStereoPanner();
+        panner.pan.value = CHVOX[channel]?.pan || 0;
+        env.connect(panner);
+        panner.connect(master);
+      } else {
+        env.connect(master);
+      }
       osc.start(when);
       osc.stop(when + 0.4);
       osc.onended = () => {
         osc.disconnect();
         env.disconnect();
+        if (panner) panner.disconnect();
       };
+    };
+
+    const fallbackVoice = (events) => {
+      if (!events.length) return false;
+      if (!configurationAware) return Boolean(synth && speak(events));
+      if (!ensureCtx() || !ctx) return false;
+      for (const ev of events) tone(ev.lane, ctx.currentTime);
+      return true;
     };
 
     // -- source 0: pre-rendered neural clips as Web Audio buffers --
@@ -447,7 +493,7 @@
             }
             // A pack can match only some audible lines after an edit. Fall back only for the
             // unmatched audible subset; never let a silent lane consume that decision.
-            if (missing.length && synth && speak(missing)) return;
+            if (missing.length && fallbackVoice(missing)) return;
             if (any) {
               // Web Speech is optional. Keep the final Web Audio fallback audible for only the
               // unmatched lines rather than adding duplicate tones beneath matched clips.
@@ -457,12 +503,12 @@
               return;
             }
             // a clip pack is loaded but no audible clip matched (e.g. text edited in the editor)
-            if (audible.length && synth && speak(audible)) return;
+            if (audible.length && fallbackVoice(audible)) return;
           } else {
             loadSamples();
             return;
           }
-        } else if (audible.length && synth && speak(audible)) {
+        } else if (audible.length && fallbackVoice(audible)) {
           return;
         }
       }
@@ -591,6 +637,25 @@
       onPick(b.dataset.score);
     };
     scoresSeg.addEventListener('click', onScorePick);
+
+    const voiceConfigRow = q('.t-voice-config-row');
+    const voiceConfigSelect = q('.t-voice-config');
+    if (!voiceConfigRow || !voiceConfigSelect) {
+      /* a minimal host may omit the optional selector */
+    } else if (!VOICE_CONFIG_IDS.length) {
+      voiceConfigRow.style.display = 'none';
+    } else {
+      for (const id of VOICE_CONFIG_IDS) {
+        const option = document.createElement('option');
+        option.value = id;
+        option.textContent = id
+          .split('-')
+          .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+          .join(' ');
+        voiceConfigSelect.appendChild(option);
+      }
+      voiceConfigSelect.value = VOICE_CONFIG;
+    }
 
     const sections = q('.t-sections');
     for (const key of Object.keys(SECTIONS)) {
@@ -1214,6 +1279,20 @@
         else advance(s);
       } else illuminate(s);
     };
+    const onVoiceConfigChange = () => {
+      const next = voiceConfigSelect?.value;
+      if (!next || next === VOICE_CONFIG) return;
+      pause();
+      sel = 'full';
+      for (const button of sections.children) {
+        button.classList.toggle('on', button.dataset.s === 'full');
+      }
+      clearPerformed();
+      currentRow = 0;
+      hasStruckCurrent = false;
+      renderRow(0);
+      onVoiceConfig(next);
+    };
     const onMode = (e) => {
       const b = e.target.closest('button');
       if (!b) return;
@@ -1368,6 +1447,7 @@
 
     playBtn.addEventListener('click', onPlay);
     restartBtn.addEventListener('click', onRestart);
+    voiceConfigSelect?.addEventListener('change', onVoiceConfigChange);
     soundSeg.addEventListener('click', onSound);
     modeSeg.addEventListener('click', onMode);
     countinBtn.addEventListener('click', onCountin);
@@ -1391,6 +1471,7 @@
         playing = false;
         if (rafId !== null) cancelAnimationFrame(rafId);
         clearCount();
+        voiceConfigSelect?.removeEventListener('change', onVoiceConfigChange);
         window.removeEventListener('resize', onResize);
         window.removeEventListener('keydown', onKey);
         for (const inp of midiInputs) inp.removeEventListener('midimessage', onMidi);

@@ -360,3 +360,21 @@
   accent-color: #cdbf9a;
   height: 2px;
 }
+.sse .voice-config {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(233, 230, 220, 0.42);
+}
+.sse .voice-config select {
+  font-family: var(--serif);
+  font-size: 11px;
+  padding: 5px 8px;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: #101012;
+  color: var(--ink);
+}
