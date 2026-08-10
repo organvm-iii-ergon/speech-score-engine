@@ -92,23 +92,26 @@
 
     root.classList.add('sse');
     root.dataset.score = SC.id;
+    const artworkMeta = SC.artwork;
+    const hasArtwork = Boolean(artworkMeta?.image);
+    if (hasArtwork) root.dataset.artwork = artworkMeta.id || 'present';
+    else delete root.dataset.artwork;
     root.innerHTML = TEMPLATE;
     const q = (sel) => root.querySelector(sel);
 
     const artwork = q('.t-artwork');
     if (artwork) {
-      const hasArtwork = SC.id === 'lady-macbeth-macbeth';
       artwork.hidden = !hasArtwork;
       artwork.innerHTML = hasArtwork
         ? [
             '<img class="artwork-bleed" data-sse-artwork',
-            '  src="/prototypes/artwork/lady-macbeth-macbeth-painting.png"',
+            `  src="${artworkMeta.image}"`,
             '  alt="" aria-hidden="true" />',
             '<img class="artwork-original" data-sse-artwork',
-            '  src="/prototypes/artwork/lady-macbeth-macbeth-painting.png"',
-            '  alt="Painted Skeleton with Poetic Text by Amaan Jahangir" />',
-            '<a class="artwork-credit" href="https://linktr.ee/amaanjahangir"',
-            '  target="_blank" rel="noreferrer">Artwork @amaanjahangir</a>',
+            `  src="${artworkMeta.image}"`,
+            `  alt="${artworkMeta.alt || `${artworkMeta.title} by ${artworkMeta.artist}`}" />`,
+            `<a class="artwork-credit" href="${artworkMeta.sourceUrl}"`,
+            `  target="_blank" rel="noreferrer">${artworkMeta.credit}</a>`,
           ].join('\n')
         : '';
     }
@@ -118,6 +121,13 @@
     const CH = LANES.map((l) => l.id);
     const HEAD = {};
     const laneById = new Map(LANES.map((l) => [l.id, l]));
+    const laneAlignment = (lane, index) => {
+      if (lane?.align) return lane.align;
+      if (CH.length === 1) return 'center';
+      const midpoint = (CH.length - 1) / 2;
+      return index < midpoint ? 'right' : index > midpoint ? 'left' : 'center';
+    };
+    const alignById = new Map(LANES.map((lane, index) => [lane.id, laneAlignment(lane, index)]));
     const isHuman = (lane) => laneById.get(lane)?.performer === 'human';
     const TONES = {};
     const CHVOX = {};
@@ -281,6 +291,17 @@
         ctx = null;
         return false;
       }
+    };
+    const resumeAudio = async () => {
+      if (!ctx || ctx.state === 'closed') return false;
+      if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
+        try {
+          await ctx.resume();
+        } catch (err) {
+          return false;
+        }
+      }
+      return ctx.state === 'running';
     };
     const refreshMasterAudibility = () => {
       if (!ctx || !master) return;
@@ -551,7 +572,7 @@
     heads.appendChild(gh);
     for (const c of CH) {
       const el = document.createElement('div');
-      const align = laneById.get(c)?.align;
+      const align = alignById.get(c);
       el.className = `h${isHuman(c) ? ' live' : ''}${align ? ` align-${align}` : ''}`;
       el.textContent = HEAD[c];
       el.dataset.lane = c;
@@ -572,7 +593,7 @@
       row.appendChild(num);
       for (const c of CH) {
         const cell = document.createElement('div');
-        const align = laneById.get(c)?.align;
+        const align = alignById.get(c);
         cell.className = `cell${align ? ` align-${align}` : ''}`;
         cellRef.set(`${r}:${c}`, cell);
         row.appendChild(cell);
@@ -588,6 +609,7 @@
       span.textContent = ev.text;
       cell.appendChild(span);
       ev.el = span;
+      ev.cell = cell;
     }
 
     // Continuous-passage scores can show many visual lines while triggering one full voice clip.
@@ -747,6 +769,7 @@
       timedVoiceResumeGeneration += 1;
       for (const ev of EV) {
         if (ev.el) ev.el.classList.remove('spoken', 'now');
+        if (ev.cell) ev.cell.classList.remove('line-active');
       }
       nowWords = [];
       timedStartTs = null;
@@ -769,6 +792,7 @@
     const illuminate = (row) => {
       if (timedCues) return;
       for (const w of nowWords) w.classList.remove('now');
+      for (const ev of EV) ev.cell?.classList.remove('line-active');
       nowWords = [];
       const evs = eventsByRow.get(row);
       if (!evs) return;
@@ -777,12 +801,13 @@
         ev.el.classList.add('spoken');
         void ev.el.offsetWidth;
         ev.el.classList.add('now');
+        ev.cell?.classList.add('line-active');
         nowWords.push(ev.el);
       }
     };
     const illuminateRowComplete = (timestamp) => {
       if (!rowCompletePlan || timedStartTs === null) return;
-      const elapsed = Math.max(0, (timestamp - timedStartTs) / 1000);
+      const elapsed = Math.max(0, (timestamp - timedStartTs) / 1000) * timedTempoScale;
       const [sectionStart, sectionEnd] = timedRange();
       nowWords = [];
       for (const row of rowCompletePlan.rows) {
@@ -793,6 +818,7 @@
         for (const ev of row.events) {
           ev.el?.classList.toggle('now', isNow);
           ev.el?.classList.toggle('spoken', inSection && elapsed >= end);
+          ev.cell?.classList.toggle('line-active', isNow);
           if (isNow && ev.el) nowWords.push(ev.el);
           if (isNow && soundMode === 'tone' && !timedToneCues.has(ev)) {
             timedToneCues.add(ev);
@@ -816,6 +842,7 @@
         const isNow = inSection && seconds >= cue.start && seconds < cue.end;
         cue.ev.el.classList.toggle('now', isNow);
         cue.ev.el.classList.toggle('spoken', inSection && seconds >= cue.end);
+        cue.ev.cell?.classList.toggle('line-active', isNow);
         if (isNow) nowWords.push(cue.ev.el);
       }
       playTimedTones(
@@ -923,8 +950,8 @@
       if (!rows.length) return false;
       timedRunGeneration += 1;
       rowCompleteOffset = rows[0].start;
-      timedTempoScale = 1;
-      timedPassageDuration = rows.at(-1).end - rowCompleteOffset;
+      timedTempoScale = tempoBps / scoreTempoBps;
+      timedPassageDuration = (rows.at(-1).end - rowCompleteOffset) / timedTempoScale;
       timedStartTs = performance.now() + 15;
       hasStruckCurrent = true;
       if (soundMode === 'tone') {
@@ -934,7 +961,8 @@
           rows.flatMap((row) =>
             row.events.map((event) => ({
               ...event,
-              scheduleSeconds: row.start - rowCompleteOffset,
+              scheduleSeconds: (row.start - rowCompleteOffset) / timedTempoScale,
+              transportRate: timedTempoScale,
             })),
           ),
         );
@@ -989,6 +1017,7 @@
       if (!timedCues || !CLIPS || timedStartTs === null) return false;
       const run = timedRunGeneration;
       const resume = ++timedVoiceResumeGeneration;
+      if (!(await resumeAudio())) return false;
       const ready = await loadSamples();
       // Decoding can outlive a pause, section change, or another monitor choice. Only the same
       // running passage may recreate sources, and it must still be explicitly in Voices mode.
@@ -1012,10 +1041,11 @@
       if (!rowCompletePlan || !CLIPS || timedStartTs === null) return false;
       const run = timedRunGeneration;
       const resume = ++timedVoiceResumeGeneration;
+      if (!(await resumeAudio())) return false;
       const ready = await loadSamples();
       if (!ready || resume !== timedVoiceResumeGeneration || !timedRunIsActive(run)) return false;
       const [sectionStart, sectionEnd] = timedRange();
-      const elapsed = Math.max(0, (performance.now() - timedStartTs) / 1000);
+      const elapsed = Math.max(0, (performance.now() - timedStartTs) / 1000) * timedTempoScale;
       const remaining = rowCompletePlan.rows
         .filter((row) => row.tick >= sectionStart && row.tick < sectionEnd)
         .flatMap((row) => {
@@ -1026,7 +1056,8 @@
           return row.events.map((event) => ({
             ...event,
             sectionTrimStart,
-            scheduleSeconds: Math.max(0, start - elapsed),
+            scheduleSeconds: Math.max(0, (start - elapsed) / timedTempoScale),
+            transportRate: timedTempoScale,
           }));
         });
       if (!remaining.length) return false;
@@ -1081,8 +1112,7 @@
     // Prime the active sound source on a user gesture (autoplay/TTS both require it).
     const primeAudio = async () => {
       if (silent) return;
-      ensureCtx();
-      if (ctx && ctx.state === 'suspended') ctx.resume();
+      if (ensureCtx()) await resumeAudio();
       if (soundMode === 'voice') {
         if (CLIPS) await loadSamples();
         else if (synth) {
@@ -1399,7 +1429,7 @@
       ensureCtx();
       refreshMasterAudibility();
       refreshActiveSourceAudibility();
-      if (ctx && ctx.state === 'suspended') ctx.resume();
+      if (ctx && (ctx.state === 'suspended' || ctx.state === 'interrupted')) void resumeAudio();
       if (m === 'voice') {
         if (CLIPS) {
           // Tones intentionally stops the continuous clips while the timed visual clock keeps
@@ -1428,19 +1458,14 @@
     const onTempo = () => {
       tempoBps = Number.parseFloat(tempo.value);
       rps = tempoBps * SUBDIV;
-      if (rowCompletePlan) {
-        tempoBps = scoreTempoBps;
-        rps = tempoBps * SUBDIV;
-        tempo.value = String(tempoBps);
-        return;
-      }
-      if (timedCues && playing) {
+      if ((rowCompletePlan || timedCues) && playing) {
         stopSamples();
         clearPerformed();
         const [s] = timedRange();
         currentRow = s;
         renderRow(s);
-        startTimedPassage();
+        if (rowCompletePlan) startRowCompletePassage();
+        else startTimedPassage();
       }
     };
     const onSections = (e) => {

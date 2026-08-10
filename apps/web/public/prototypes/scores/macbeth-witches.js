@@ -16,6 +16,7 @@
       rate: '-8%',
       pan: -0.55,
       gain: 1.0,
+      align: 'right',
       tone: { f: 330.0, type: 'sawtooth' },
       speech: { pitch: 0.9, rate: 0.92, prefer: ['sonia', 'kate', 'female'] },
     },
@@ -27,6 +28,7 @@
       rate: '-6%',
       pan: 0.0,
       gain: 1.0,
+      align: 'center',
       tone: { f: 392.0, type: 'sawtooth' },
       speech: { pitch: 1.0, rate: 0.95, prefer: ['jenny', 'samantha', 'female'] },
     },
@@ -38,6 +40,7 @@
       rate: '-10%',
       pan: 0.55,
       gain: 1.0,
+      align: 'left',
       tone: { f: 294.0, type: 'sawtooth' },
       speech: { pitch: 1.12, rate: 0.9, prefer: ['aria', 'victoria', 'female'] },
     },
@@ -84,6 +87,19 @@
     byline: 'three AI voices · Shakespeare',
     caption:
       'The weird sisters at the cauldron. Ingredient lines pass between them; the refrain strikes all three at once — panned left, centre, right — so the chant overlaps into one voice.',
+    artwork: {
+      id: 'macbeth-witches-savery-1615',
+      title: 'Cows in a Stable; Witches in the Four Corners',
+      artist: 'Roelant Savery',
+      date: '1615',
+      sourceUrl:
+        'https://www.rijksmuseum.nl/en/collection/object/Cows-in-a-Stable-Witches-in-the-Four-Corners--b4b1ccb1b6449bf9910734bf1f581c21',
+      image: '/prototypes/artwork/macbeth-witches-savery-1615.webp',
+      credit:
+        'Cows in a Stable; Witches in the Four Corners (1615) — Roelant Savery · Rijksmuseum · public domain',
+      license: 'Public domain',
+      alt: 'Cows in a Stable; Witches in the Four Corners, 1615, by Roelant Savery',
+    },
     tempo: 2.5,
     lanes: LANES,
     sections: {

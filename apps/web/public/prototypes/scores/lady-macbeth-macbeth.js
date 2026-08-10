@@ -50,6 +50,17 @@
     short: 'Lady Macbeth / Macbeth',
     title: 'Lady Macbeth / Macbeth',
     byline: 'poem @two.be · artwork @amaanjahangir',
+    artwork: {
+      id: 'lady-macbeth-macbeth-painting',
+      title: 'Painted Skeleton with Poetic Text',
+      artist: 'Amaan Jahangir',
+      date: 'contemporary',
+      sourceUrl: 'https://linktr.ee/amaanjahangir',
+      image: '/prototypes/artwork/lady-macbeth-macbeth-painting.png',
+      credit: 'Artwork @amaanjahangir',
+      license: 'artist-authorized republication',
+      alt: 'Painted Skeleton with Poetic Text by Amaan Jahangir',
+    },
     caption:
       'A synchronized two-player tracker: each row advances only when both UK neural voices finish.',
     playback: 'row-complete',

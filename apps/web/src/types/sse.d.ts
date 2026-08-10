@@ -12,7 +12,7 @@ export interface Lane {
   rate?: string;
   pan?: number;
   gain?: number;
-  align?: 'left' | 'right';
+  align?: 'left' | 'right' | 'center';
   tone?: { f: number; type: string };
   speech?: { pitch: number; rate: number; prefer: string[] };
 }
@@ -48,6 +48,17 @@ export interface Score {
   title: string;
   byline?: string;
   caption?: string;
+  artwork?: {
+    id?: string;
+    title: string;
+    artist: string;
+    date?: string;
+    sourceUrl: string;
+    image: string;
+    credit: string;
+    license?: string;
+    alt?: string;
+  };
   playback?: 'row-complete';
   voiceConfigurations?: Record<string, Record<string, VoiceTreatment>>;
   defaultVoiceConfiguration?: string;

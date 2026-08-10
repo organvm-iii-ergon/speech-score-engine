@@ -19,8 +19,13 @@ const PROTO = path.join(ROOT, 'apps/web/public/prototypes');
 const SHELL = path.join(PROTO, 'philip-glass-tracker.html');
 const OUT_DIR = path.join(ROOT, 'dist');
 const OUT = path.join(OUT_DIR, 'speech-score.html');
-const ARTWORK_RELATIVE = 'artwork/lady-macbeth-macbeth-painting.png';
-const ARTWORK_PUBLIC_PATH = `/prototypes/${ARTWORK_RELATIVE}`;
+const ARTWORK_RELATIVE_PATHS = [
+  'artwork/lady-macbeth-macbeth-painting.png',
+  'artwork/philip-glass-abstract-composition-1994.webp',
+  'artwork/richard-anne-portrait-woman-1590.webp',
+  'artwork/earnest-de-brug-1895.webp',
+  'artwork/macbeth-witches-savery-1615.webp',
+];
 
 const readLocal = (href) => {
   const file = path.join(PROTO, href);
@@ -68,7 +73,9 @@ html = html.replace(/<script\b[^>]*\bsrc=["']([^"']+)["'][^>]*>\s*<\/script>/gi,
   return `<script>\n${safeJs(readLocal(src))}\n</script>`;
 });
 
-inlineImage(ARTWORK_PUBLIC_PATH, ARTWORK_RELATIVE);
+for (const relativePath of ARTWORK_RELATIVE_PATHS) {
+  inlineImage(`/prototypes/${relativePath}`, relativePath);
+}
 
 const banner = `<!-- BUILT — single-file bundle of the speech-score tracker. Do not edit by hand.
      Source: apps/web/public/prototypes/ (${inlined.length} files inlined). Rebuild: node tools/build-standalone.mjs -->\n`;

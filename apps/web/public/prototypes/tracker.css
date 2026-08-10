@@ -117,6 +117,11 @@
 .sse .heads .h.align-left {
   padding-left: clamp(12px, 3vw, 48px);
 }
+.sse .heads .h.align-center {
+  padding-left: 0;
+  padding-right: 0;
+  text-align: center;
+}
 .sse .heads .h.live::after {
   content: " ●";
   font-size: 0.7em;
@@ -250,6 +255,13 @@
 .sse .cell.align-left {
   padding-left: clamp(12px, 3vw, 48px);
 }
+.sse .cell.align-center {
+  display: flex;
+  justify-content: center;
+  padding-left: 0;
+  padding-right: 0;
+  text-align: center;
+}
 .sse .word {
   display: inline-block;
   max-width: 100%;
@@ -382,7 +394,7 @@
 }
 .sse .tempo input {
   flex: 1;
-  accent-color: #cdbf9a;
+  accent-color: var(--accent);
   height: 2px;
 }
 .sse .voice-config {
@@ -392,7 +404,7 @@
   font-size: 9px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: rgba(233, 230, 220, 0.42);
+  color: var(--label);
 }
 .sse .voice-config select {
   font-family: var(--serif);
@@ -404,9 +416,9 @@
   color: var(--ink);
 }
 
-/* The Lady Macbeth score is a gallery-like light treatment. The score id is written by the
-   engine on the mounted .sse root, so every other score continues to use the dark defaults above. */
-.sse[data-score="lady-macbeth-macbeth"] {
+/* Scores with an artwork source use the gallery-like light treatment. The engine writes the
+   artwork id on the mounted root; editor fixtures without artwork retain the dark defaults. */
+.sse[data-artwork] {
   --stage: #ffffff;
   --page: #ffffff;
   --page-edge: #e8e5df;
@@ -440,15 +452,16 @@
   --segment-on: rgba(29, 29, 27, 0.1);
   --label: rgba(29, 29, 27, 0.58);
   --control-bg: #ffffff;
+  width: 100%;
+  margin-inline: auto;
 }
 
-/* The artwork slot is present in the shared engine template but is populated only for Lady
-   Macbeth. It lives inside the viewport so the score text is layered over the painting. The
+/* The artwork slot lives inside the viewport so score text is layered over the painting. The
    original stays centered while a blurred full-width bleed gives the edges an atmospheric wash. */
 .sse .artwork-panel {
   display: none;
 }
-.sse[data-score="lady-macbeth-macbeth"] .artwork-panel {
+.sse[data-artwork] .artwork-panel {
   display: block;
   position: absolute;
   inset: 0;
@@ -456,10 +469,10 @@
   overflow: hidden;
   pointer-events: none;
 }
-.sse[data-score="lady-macbeth-macbeth"] .track {
+.sse[data-artwork] .track {
   z-index: 1;
 }
-.sse[data-score="lady-macbeth-macbeth"] .artwork-bleed {
+.sse[data-artwork] .artwork-bleed {
   display: block;
   position: absolute;
   inset: -32px;
@@ -467,43 +480,83 @@
   height: calc(100% + 64px);
   object-fit: cover;
   filter: blur(30px) saturate(1.12);
-  opacity: 0.58;
+  opacity: 0.62;
   transform: scale(1.04);
 }
-.sse[data-score="lady-macbeth-macbeth"] .artwork-original {
+.sse[data-artwork] .artwork-original {
   display: block;
   position: absolute;
   top: 50%;
   left: 50%;
   width: auto;
   height: 100%;
-  max-width: min(62vw, 34rem);
+  max-width: min(56vw, 36rem);
   object-fit: contain;
   opacity: 1;
   transform: translate(-50%, -50%);
 }
-.sse[data-score="lady-macbeth-macbeth"] .word.now {
+.sse[data-artwork] .viewport::before,
+.sse[data-artwork] .viewport::after {
+  background: transparent;
+}
+.sse[data-artwork] .heads,
+.sse[data-artwork] .row {
+  grid-template-columns: var(--lanes);
+}
+.sse[data-artwork] .heads .h.gut {
+  display: none;
+}
+.sse[data-artwork] .rownum {
+  position: absolute;
+  left: clamp(10px, 1.4vw, 22px);
+  top: 50%;
+  width: clamp(1.4rem, 3vw, 3rem);
+  transform: translateY(-50%);
+  text-align: left;
+  pointer-events: none;
+}
+.sse[data-artwork] .cell.line-active {
   z-index: 2;
-  padding: 0.04em 0.18em;
-  margin: 0 -0.18em;
+  display: flex;
+  align-items: center;
+  min-height: 1.5em;
   color: var(--ink);
   background: #ffffff;
   border-radius: 2px;
-  box-shadow: 0 0 0 0.12em #ffffff, 0 1px 8px rgba(29, 29, 27, 0.12);
+  box-shadow: 0 1px 8px rgba(29, 29, 27, 0.14);
+}
+.sse[data-artwork] .cell.align-right.line-active {
+  margin-right: 3px;
+}
+.sse[data-artwork] .cell.align-left.line-active {
+  margin-left: 3px;
+}
+.sse[data-artwork] .cell.align-center.line-active {
+  margin-inline: 2px;
+}
+.sse[data-artwork] .cell.line-active .word,
+.sse[data-artwork] .cell.line-active .word.now {
+  z-index: 2;
+  padding: 0;
+  margin: 0;
+  color: var(--ink);
+  opacity: 1;
+  background: transparent;
+  box-shadow: none;
   text-shadow: none;
 }
-.sse[data-score="lady-macbeth-macbeth"] .artwork-credit {
+.sse[data-artwork] .artwork-credit {
   position: absolute;
   top: 5px;
   right: 18px;
-  z-index: 1;
+  z-index: 4;
   color: var(--byline);
   font-family: system-ui, sans-serif;
   font-size: 9px;
   letter-spacing: 0.08em;
   text-decoration: none;
 }
-.sse[data-score="lady-macbeth-macbeth"] .artwork-credit:hover {
+.sse[data-artwork] .artwork-credit:hover {
   color: var(--ink);
   text-decoration: underline;
 }

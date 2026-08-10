@@ -33,6 +33,13 @@ const SCORE_FILE = path.join(ROOT, SCORE_RELATIVE);
 const VOICE_FILE = path.join(ROOT, VOICE_RELATIVE);
 const ARTWORK_RELATIVE = `apps/web/public/prototypes/artwork/${SCORE_ID}-painting.png`;
 const ARTWORK_FILE = path.join(ROOT, ARTWORK_RELATIVE);
+const SCORE_ARTWORKS = {
+  'lady-macbeth-macbeth': 'apps/web/public/prototypes/artwork/lady-macbeth-macbeth-painting.png',
+  'philip-glass': 'apps/web/public/prototypes/artwork/philip-glass-abstract-composition-1994.webp',
+  'richard-and-anne': 'apps/web/public/prototypes/artwork/richard-anne-portrait-woman-1590.webp',
+  'earnest-duet': 'apps/web/public/prototypes/artwork/earnest-de-brug-1895.webp',
+  'macbeth-witches': 'apps/web/public/prototypes/artwork/macbeth-witches-savery-1615.webp',
+};
 
 const EXPECTED_PAIRS = [
   ['i love', 'you'],
@@ -68,11 +75,11 @@ const EXPECTED_VOICE_CONFIGURATIONS = {
   },
 };
 
-function evaluateRegistration(file, registration) {
+function evaluateRegistration(file, registration, id = SCORE_ID) {
   const sandbox = {};
   vm.createContext(sandbox);
   new vm.Script(fs.readFileSync(file, 'utf8'), { filename: file }).runInContext(sandbox);
-  const value = sandbox[registration]?.[SCORE_ID];
+  const value = sandbox[registration]?.[id];
   return value ? JSON.parse(JSON.stringify(value)) : undefined;
 }
 
@@ -245,6 +252,7 @@ function mountTimedTracker({
   deferDecode = false,
   voiceConfig,
   missingClipKey = null,
+  audioContextState = 'running',
   scoreOverride = score,
 } = {}) {
   const activeVoiceConfig = voiceConfig ?? scoreOverride.defaultVoiceConfiguration;
@@ -257,6 +265,7 @@ function mountTimedTracker({
   const speechUtterances = [];
   const starts = [];
   const pendingDecodes = [];
+  const resumeCalls = [];
   const decodedBuffer = {
     duration: 10,
     getChannelData: () => new Float32Array(1),
@@ -265,7 +274,7 @@ function mountTimedTracker({
   class FakeAudioContext {
     constructor() {
       this.destination = fakeElement('destination');
-      this.state = 'running';
+      this.state = audioContextState;
     }
 
     get currentTime() {
@@ -329,6 +338,8 @@ function mountTimedTracker({
     }
 
     resume() {
+      resumeCalls.push(true);
+      this.state = 'running';
       return Promise.resolve();
     }
 
@@ -446,7 +457,10 @@ function mountTimedTracker({
     starts,
     selectedVoiceConfigurations,
     speechUtterances,
+    resumeCalls,
     artwork: ui.get('.t-artwork'),
+    events: runtimeScore.events,
+    tempo: ui.get('.t-tempo'),
     toneButton,
     ui,
     cueButton,
@@ -468,6 +482,18 @@ async function emitTrackerClick(element, target = element) {
 
 const score = evaluateRegistration(SCORE_FILE, 'SSE_SCORES');
 const voicePack = evaluateRegistration(VOICE_FILE, 'SSE_VOICES');
+const scoreFiles = Object.fromEntries(
+  Object.keys(SCORE_ARTWORKS).map((id) => [
+    id,
+    path.join(ROOT, `apps/web/public/prototypes/scores/${id}.js`),
+  ]),
+);
+const allScores = Object.fromEntries(
+  Object.entries(scoreFiles).map(([id, file]) => [
+    id,
+    evaluateRegistration(file, 'SSE_SCORES', id),
+  ]),
+);
 
 test('score preserves the nine simultaneous left/right pairs and row-complete lane geometry', () => {
   assert.ok(score, 'score must self-register');
@@ -657,7 +683,7 @@ test('library, tracker, editor, and standalone source all register the score lan
   assert.match(standalone, /voicePack: voices/);
 });
 
-test('the live Lady Macbeth route has score-aware artwork while other scores keep the dark shell', () => {
+test('every score has a centered artwork treatment while Lady Macbeth keeps its dedicated route', () => {
   const engine = fs.readFileSync(
     path.join(ROOT, 'apps/web/public/prototypes/tracker-engine.js'),
     'utf8',
@@ -682,19 +708,35 @@ test('the live Lady Macbeth route has score-aware artwork while other scores kee
     fs.readFileSync(ARTWORK_FILE).subarray(0, 8),
     Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
   );
+  for (const [id, relative] of Object.entries(SCORE_ARTWORKS)) {
+    const file = path.join(ROOT, relative);
+    assert.ok(fs.existsSync(file), `${id} artwork asset must be tracked`);
+    assert.ok(fs.statSync(file).size > 100_000, `${id} artwork asset must contain image data`);
+    assert.ok(allScores[id]?.artwork, `${id} score must declare artwork metadata`);
+    assert.equal(
+      allScores[id].artwork.image,
+      `/prototypes/${relative.replace('apps/web/public/prototypes/', '')}`,
+    );
+    assert.ok(allScores[id].artwork.sourceUrl, `${id} artwork must retain a source link`);
+    assert.ok(allScores[id].artwork.credit, `${id} artwork must retain visible credit`);
+  }
   assert.match(engine, /root\.dataset\.score = SC\.id/);
-  assert.match(engine, /artwork\/lady-macbeth-macbeth-painting\.png/);
+  assert.match(engine, /root\.dataset\.artwork/);
+  assert.match(engine, /artworkMeta\.image/);
   assert.match(engine, /artwork-original/);
   assert.match(engine, /artwork-bleed/);
-  assert.match(styles, /\.sse\[data-score="lady-macbeth-macbeth"\]/);
-  assert.match(styles, /\.sse\[data-score="lady-macbeth-macbeth"\] \.artwork-panel/);
+  assert.match(styles, /\.sse\[data-artwork\]/);
+  assert.match(styles, /\.sse\[data-artwork\] \.artwork-panel/);
   assert.match(styles, /filter: blur\(30px\) saturate\(1\.12\)/);
-  assert.match(styles, /\.sse\[data-score="lady-macbeth-macbeth"\] \.word\.now/);
+  assert.match(styles, /\.sse\[data-artwork\] \.cell\.line-active/);
+  assert.match(styles, /grid-template-columns: var\(--lanes\)/);
+  assert.match(styles, /align-right\.line-active/);
+  assert.match(styles, /align-left\.line-active/);
   assert.match(dedicatedRoute, /defaultScoreId="lady-macbeth-macbeth"/);
   assert.match(dedicatedRoute, /defaultVoiceConfig="separated"/);
   assert.match(library, /'\/scores\/lady-macbeth-macbeth\/'/);
   assert.match(library, /`\/tracker\?score=\$\{encodeURIComponent\(c\.score\.id\)\}`/);
-  assert.match(standaloneBuilder, /ARTWORK_PUBLIC_PATH/);
+  assert.match(standaloneBuilder, /ARTWORK_RELATIVE_PATHS/);
   assert.match(standaloneBuilder, /data:\$\{mimeType\(file\)\};base64/);
 
   const lady = mountTimedTracker();
@@ -703,19 +745,22 @@ test('the live Lady Macbeth route has score-aware artwork while other scores kee
   assert.match(lady.artwork.innerHTML, /data-sse-artwork/);
   assert.match(lady.artwork.innerHTML, /artwork-original/);
   assert.match(lady.artwork.innerHTML, /@amaanjahangir/);
+  assert.equal(lady.root.dataset.artwork, 'lady-macbeth-macbeth-painting');
   lady.mounted.destroy();
 
   const other = mountTimedTracker({
     scoreOverride: {
       ...score,
       id: 'philip-glass',
+      artwork: allScores['philip-glass'].artwork,
       voiceConfigurations: undefined,
       defaultVoiceConfiguration: undefined,
     },
   });
   assert.equal(other.root.dataset.score, 'philip-glass');
-  assert.equal(other.artwork.hidden, true);
-  assert.equal(other.artwork.innerHTML, '');
+  assert.equal(other.artwork.hidden, false);
+  assert.match(other.artwork.innerHTML, /philip-glass-abstract-composition-1994\.webp/);
+  assert.equal(other.root.dataset.artwork, 'philip-glass-abstract-composition-1994');
   other.mounted.destroy();
 });
 
@@ -825,7 +870,11 @@ test('tracker keeps continuous-passage cues and derives row-complete tracker bou
     /const duration = Math\.max\(\.\.\.clips\.map\(\(clip\) => clip\.timing\.duration\)\)/,
   );
   assert.match(engine, /const startRowCompletePassage = \(\) =>/);
-  assert.match(engine, /scheduleSeconds: row\.start - rowCompleteOffset/);
+  assert.match(engine, /scheduleSeconds: \(row\.start - rowCompleteOffset\) \/ timedTempoScale/);
+  assert.match(engine, /transportRate: timedTempoScale/);
+  assert.match(engine, /const resumeAudio = async \(\) =>/);
+  assert.match(engine, /await resumeAudio\(\)/);
+  assert.match(engine, /ev\.cell\?\.classList\.toggle\('line-active', isNow\)/);
   assert.match(engine, /if \(rowCompletePlan && timedStartTs !== null\)/);
   assert.match(engine, /const playTimedCueRow = \(row\) =>/);
   assert.match(engine, /if \(timedCues && cue\)[\s\S]*?playTimedCueRow\(row\);[\s\S]*?return;/);
@@ -913,6 +962,15 @@ test('Tones to Voices resumes the active timed passage at its live source offset
 test('runtime row-complete transport schedules both lanes together and waits for the longer line', async () => {
   const tracker = mountTimedTracker();
   await emitTrackerClick(tracker.ui.get('.t-play'));
+  const loop = [...tracker.animationFrames.values()][0];
+  assert.ok(loop, 'row-complete performance must have a pending animation frame');
+  loop(15);
+  assert.ok(
+    tracker.events
+      .filter((event) => event.row === 0)
+      .every((event) => event.cell.classList.contains('line-active')),
+    'the active row must render as two solid lane bands',
+  );
   const schedule = deriveRowCompleteSchedule(score, voicePack);
   assert.equal(
     tracker.starts.length,
@@ -936,6 +994,29 @@ test('runtime row-complete transport schedules both lanes together and waits for
     tracker.panners.filter((panner) => panner.pan.value === 1).length,
     EXPECTED_PAIRS.length,
   );
+  tracker.mounted.destroy();
+});
+
+test('row-complete tempo remains adjustable and rescales the audio clock', async () => {
+  const tracker = mountTimedTracker();
+  tracker.tempo.value = '2';
+  tracker.tempo.emit('input');
+  assert.equal(tracker.tempo.value, '2', 'the tempo control must keep the selected value');
+  await emitTrackerClick(tracker.ui.get('.t-play'));
+  const schedule = deriveRowCompleteSchedule(score, voicePack);
+  schedule.rows.forEach((row, index) => {
+    const pair = tracker.starts.slice(index * score.lanes.length, (index + 1) * score.lanes.length);
+    assert.ok(Math.abs(pair[0].when - (0.015 + row.start / 2)) < 1e-6);
+    assert.equal(pair[0].playbackRate, 2);
+  });
+  tracker.mounted.destroy();
+});
+
+test('a suspended audio context is resumed before the first voice clips are scheduled', async () => {
+  const tracker = mountTimedTracker({ audioContextState: 'suspended' });
+  await emitTrackerClick(tracker.ui.get('.t-play'));
+  assert.equal(tracker.resumeCalls.length, 1);
+  assert.equal(tracker.starts.length, score.events.length);
   tracker.mounted.destroy();
 });
 
