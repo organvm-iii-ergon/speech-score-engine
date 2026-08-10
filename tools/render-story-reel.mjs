@@ -21,8 +21,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SCORE_DIR = path.join(ROOT, 'apps/web/public/prototypes/scores');
 const VOICE_DIR = path.join(ROOT, 'apps/web/public/prototypes/voices');
 const VENV = path.join(ROOT, 'tools/.venv');
-const PYTHON = path.join(VENV, 'bin/python');
-const PIP = path.join(VENV, 'bin/pip');
+const VENV_BIN = process.platform === 'win32' ? 'Scripts' : 'bin';
+const PYTHON = path.join(VENV, VENV_BIN, process.platform === 'win32' ? 'python.exe' : 'python');
+const PIP = path.join(VENV, VENV_BIN, process.platform === 'win32' ? 'pip.exe' : 'pip');
 const FRAME_RENDERER = path.join(ROOT, 'tools/render-story-frames.py');
 
 const usage = `Usage:

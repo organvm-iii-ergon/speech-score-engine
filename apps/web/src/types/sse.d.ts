@@ -48,6 +48,7 @@ export interface Score {
   title: string;
   byline?: string;
   caption?: string;
+  playback?: 'row-complete';
   tempo?: number;
   lanes: Lane[];
   sections?: Record<string, [number, number]>;

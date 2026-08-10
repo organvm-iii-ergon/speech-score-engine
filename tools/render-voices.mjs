@@ -34,8 +34,10 @@ const requestedScoreId = args[0] === '--score' ? args[1] : null;
 const SCORES_DIR = path.join(ROOT, 'apps/web/public/prototypes/scores');
 const VOICES_DIR = path.join(ROOT, 'apps/web/public/prototypes/voices');
 const VENV = path.join(ROOT, 'tools/.venv');
+const VENV_BIN = process.platform === 'win32' ? 'Scripts' : 'bin';
+const PYTHON = path.join(VENV, VENV_BIN, process.platform === 'win32' ? 'python.exe' : 'python');
+const BOOTSTRAP_PYTHON = process.platform === 'win32' ? 'python' : 'python3';
 const CACHE = path.join(ROOT, 'tools/.cache');
-const PYTHON = path.join(VENV, 'bin/python');
 const EDGE_RENDERER = path.join(ROOT, 'tools/render-edge-tts.py');
 const PROBE_TIMEOUT_MS = 10_000;
 const BOOTSTRAP_TIMEOUT_MS = 60_000;
@@ -56,7 +58,7 @@ const canImportEdgeTts = () => {
 
 if (!fs.existsSync(PYTHON)) {
   console.log('bootstrapping tools/.venv with edge-tts ...');
-  execFileSync('python3', ['-m', 'venv', VENV], {
+  execFileSync(BOOTSTRAP_PYTHON, ['-m', 'venv', VENV], {
     stdio: 'inherit',
     timeout: BOOTSTRAP_TIMEOUT_MS,
   });

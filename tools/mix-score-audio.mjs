@@ -87,6 +87,28 @@ function loadRegistration(file, name) {
   return sandbox;
 }
 
+function loadScore(scoreId) {
+  const scriptFile = path.join(SCORES_DIR, `${scoreId}.js`);
+  const jsonFile = path.join(SCORES_DIR, `${scoreId}.json`);
+  if (fs.existsSync(scriptFile)) {
+    const score = loadRegistration(scriptFile, 'score file').SSE_SCORES?.[scoreId];
+    if (!score) fail(`Score ${JSON.stringify(scoreId)} did not register itself.`);
+    return { file: scriptFile, score };
+  }
+  if (fs.existsSync(jsonFile)) {
+    try {
+      const score = JSON.parse(fs.readFileSync(jsonFile, 'utf8'));
+      if (score?.id === scoreId && Array.isArray(score.lanes) && Array.isArray(score.events)) {
+        return { file: jsonFile, score };
+      }
+    } catch (error) {
+      fail(`Could not parse editor-exported score ${path.relative(ROOT, jsonFile)}: ${error.message}`);
+    }
+    fail(`Editor-exported score ${path.relative(ROOT, jsonFile)} is not a valid SCORE.`);
+  }
+  fail(`Missing score file: ${path.relative(ROOT, scriptFile)} or ${path.relative(ROOT, jsonFile)}`);
+}
+
 function run(command, args) {
   const result = spawnSync(command, args, { cwd: ROOT, stdio: 'inherit' });
   if (result.error) fail(`Could not run ${command}: ${result.error.message}`);
@@ -140,13 +162,10 @@ function main() {
     fail('--video and --video-out must be used together.');
   }
 
-  const scoreFile = path.join(SCORES_DIR, `${options.score}.js`);
+  const { file: scoreFile, score } = loadScore(options.score);
   const voiceFile = path.join(VOICES_DIR, `${options.score}.js`);
-  const scoreSandbox = loadRegistration(scoreFile, 'score file');
   const voiceSandbox = loadRegistration(voiceFile, 'voice pack');
-  const score = scoreSandbox.SSE_SCORES?.[options.score];
   const voicePack = voiceSandbox.SSE_VOICES?.[options.score];
-  if (!score) fail(`Score ${JSON.stringify(options.score)} did not register itself.`);
   if (!voicePack?.clips) fail(`Voice pack ${JSON.stringify(options.score)} did not register clips.`);
 
   const rowCompleteSchedule = deriveRowCompleteSchedule(score, voicePack);
@@ -240,17 +259,24 @@ function main() {
       inputs.push('-i', clipFile);
 
       const clipTiming = voicePack.timings?.[key];
-      timeline.events.push({
-        lane: event.lane,
-        text: speechText,
-        start: startSeconds,
-        pan: lane.pan ?? 0,
-        words: (clipTiming?.words || []).map((word) => ({
+      const words = (clipTiming?.words || [])
+        .map((word) => ({
           text: word.text,
           start: safeNumber(startSeconds + word.start),
-          end: safeNumber(startSeconds + word.end),
-        })),
-      });
+          end: safeNumber(Math.min(duration, startSeconds + word.end)),
+        }))
+        .filter((word) => word.start < duration && word.end > word.start);
+      // `--duration` defines the final media boundary. Do not describe words or events that were
+      // trimmed from that media as though they were part of the exact output timeline.
+      if (words.length) {
+        timeline.events.push({
+          lane: event.lane,
+          text: speechText,
+          start: startSeconds,
+          pan: lane.pan ?? 0,
+          words,
+        });
+      }
       const delay = Math.max(0, Math.round(startSeconds * 1000));
       const pan = panGains(lane.pan);
       const gain = typeof lane.gain === 'number' ? lane.gain : 1;

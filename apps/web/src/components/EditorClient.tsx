@@ -2,7 +2,13 @@
 
 import { ClipWaveform } from '@/components/ClipWaveform';
 import { loadScript, loadStylesheet } from '@/lib/loadScript';
-import { deriveScoreTotal, renameContinuousPassageLine } from '@/lib/scoreEditing';
+import {
+  deriveScoreTotal,
+  duplicateContinuousPassageEvent,
+  moveContinuousPassageEvent,
+  removeContinuousPassageEvent,
+  renameContinuousPassageLine,
+} from '@/lib/scoreEditing';
 import { ENGINE_SCRIPT, ENGINE_STYLES, SCORE_SCRIPTS } from '@/lib/scoreScripts';
 import { VOICE_CATALOG } from '@/lib/voiceCatalog';
 import type { ClipTiming, Lane, Score } from '@/types/sse';
@@ -113,6 +119,7 @@ export function EditorClient() {
   const [events, setEvents] = useState<EditEvent[]>([]);
   const [tempo, setTempo] = useState(3);
   const [total, setTotal] = useState(12);
+  const [playback, setPlayback] = useState<Score['playback']>();
   const [title, setTitle] = useState('Untitled');
   const [scoreId, setScoreId] = useState('untitled');
   const [selected, setSelected] = useState<string | null>(null);
@@ -159,6 +166,7 @@ export function EditorClient() {
     );
     seq.current = sc.events.length;
     setTempo(sc.tempo ?? 3);
+    setPlayback(sc.playback);
     setTotal(deriveScoreTotal(sc.total, sc.events));
     setTitle(sc.title);
     setScoreId(sc.id);
@@ -253,9 +261,14 @@ export function EditorClient() {
     const ls = lanesRef.current;
     const idx = Math.min(ls.length - 1, Math.max(0, d.laneIdx + Math.round(dy / LANE_H)));
     const lane = ls[idx]?.id;
-    setEvents((prev) =>
-      prev.map((x) => (x.id === d.id ? { ...x, start: ns, ...(lane ? { lane } : {}) } : x)),
-    );
+    setEvents((prev) => {
+      const current = prev.find((event) => event.id === d.id);
+      const moved: EditEvent[] =
+        lane && current && current.lane !== lane
+          ? moveContinuousPassageEvent(prev, d.id, lane)
+          : prev;
+      return moved.map((event) => (event.id === d.id ? { ...event, start: ns } : event));
+    });
   };
 
   const onClipPointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
@@ -289,18 +302,29 @@ export function EditorClient() {
   const duplicateClip = () => {
     const src = events.find((e) => e.id === selected);
     if (!src) return;
-    const ev: EditEvent = { ...src, id: uid(), start: tidy(src.start + src.beats) };
+    const ev: EditEvent = duplicateContinuousPassageEvent(src, uid(), tidy(src.start + src.beats));
     setEvents((prev) => [...prev, ev]);
     setSelected(ev.id);
   };
   const deleteClip = () => {
     if (!selected) return;
-    setEvents((prev) => prev.filter((e) => e.id !== selected));
+    setEvents((prev) => removeContinuousPassageEvent(prev, selected));
     setSelected(null);
   };
   const patchClip = (patch: Partial<EditEvent>) => {
     if (!selected) return;
-    setEvents((prev) => prev.map((e) => (e.id === selected ? { ...e, ...patch } : e)));
+    setEvents((prev) => {
+      const selectedEvent = prev.find((event) => event.id === selected);
+      if (!selectedEvent) return prev;
+      const targetLane = patch.lane;
+      if (targetLane && targetLane !== selectedEvent.lane) {
+        const moved: EditEvent[] = moveContinuousPassageEvent(prev, selected, targetLane);
+        return moved.map((event) =>
+          event.id === selected ? { ...event, ...patch, lane: targetLane } : event,
+        );
+      }
+      return prev.map((event) => (event.id === selected ? { ...event, ...patch } : event));
+    });
   };
   const renameClip = (text: string) => {
     if (!selected) return;
@@ -349,6 +373,7 @@ export function EditorClient() {
       id,
       short: title,
       title,
+      ...(playback ? { playback } : {}),
       tempo,
       lanes,
       sections: {},
@@ -376,7 +401,7 @@ export function EditorClient() {
           };
         }),
     };
-  }, [events, lanes, tempo, title, scoreId, total]);
+  }, [events, lanes, playback, tempo, title, scoreId, total]);
 
   const exportJson = () => {
     const score = toScore();
