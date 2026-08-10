@@ -1190,6 +1190,14 @@ fs.writeFileSync(timing, JSON.stringify({ voice: value('--voice'), rate: args.fi
 test('octave DSP shifts a synthetic tone by six semitones while preserving duration', () => {
   const sandboxRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'transpose-dsp-test-'));
   try {
+    for (const command of ['ffmpeg', 'ffprobe']) {
+      const capability = spawnSync(command, ['-version'], { encoding: 'utf8' });
+      assert.equal(
+        capability.status,
+        0,
+        `${command} is required for duration-preserving transpose verification: ${capability.error?.message || capability.stderr}`,
+      );
+    }
     const input = path.join(sandboxRoot, 'input.wav');
     const generated = spawnSync(
       'ffmpeg',
