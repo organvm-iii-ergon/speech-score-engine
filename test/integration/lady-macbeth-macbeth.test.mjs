@@ -15,6 +15,7 @@ import {
   renameContinuousPassageLine,
 } from '../../apps/web/src/lib/scoreEditing.js';
 import {
+  DEFAULT_VOICE_CONFIGURATION_IDS,
   resolveVoiceConfigurationId,
   selectVoicePackConfiguration,
 } from '../../apps/web/src/lib/voiceConfigurations.js';
@@ -311,7 +312,13 @@ function mountTimedTracker({
       source.detune = { value: 0 };
       source.playbackRate = { value: 1 };
       source.start = (when, offset, duration) => {
-        starts.push({ when, offset, duration, playbackRate: source.playbackRate.value });
+        starts.push({
+          when,
+          offset,
+          duration,
+          detune: source.detune.value,
+          playbackRate: source.playbackRate.value,
+        });
       };
       source.stop = () => source.onended?.();
       return source;
@@ -394,6 +401,15 @@ function mountTimedTracker({
   const runtimeTimings = JSON.parse(JSON.stringify(selectedPack.timings));
   const clips = Object.fromEntries(Object.keys(runtimeTimings).map((key) => [key, 'AA==']));
   if (missingClipKey) delete clips[missingClipKey];
+  const runtimeVoicePack = scoreOverride.voiceConfigurations
+    ? JSON.parse(JSON.stringify(voicePack))
+    : { clips, timings: runtimeTimings };
+  if (missingClipKey) {
+    delete runtimeVoicePack.clips?.[missingClipKey];
+    for (const configuration of Object.values(runtimeVoicePack.configurations || {})) {
+      delete configuration.clips?.[missingClipKey];
+    }
+  }
   const speechSynthesis = {
     pending: false,
     getVoices: () => [{ name: 'Test English', lang: 'en-GB' }],
@@ -436,6 +452,7 @@ function mountTimedTracker({
   ).runInContext(sandbox);
   const mounted = window.SSEEngine.mount(root, {
     score: runtimeScore,
+    voicePack: runtimeVoicePack,
     clips,
     timings: runtimeTimings,
     voiceConfig: activeVoiceConfig,
@@ -683,16 +700,17 @@ test('library, tracker, editor, and standalone source all register the score lan
   assert.match(standalone, /voicePack: voices/);
 });
 
-test('every score has a centered artwork treatment while Lady Macbeth keeps its dedicated route', () => {
+test('every score uses the same artwork, route, treatment, and transport machine', async () => {
   const engine = fs.readFileSync(
     path.join(ROOT, 'apps/web/public/prototypes/tracker-engine.js'),
     'utf8',
   );
   const styles = fs.readFileSync(path.join(ROOT, 'apps/web/public/prototypes/tracker.css'), 'utf8');
-  const dedicatedRoute = fs.readFileSync(
-    path.join(ROOT, 'apps/web/src/app/scores/lady-macbeth-macbeth/page.tsx'),
+  const scoreRoute = fs.readFileSync(
+    path.join(ROOT, 'apps/web/src/app/scores/[scoreId]/page.tsx'),
     'utf8',
   );
+  const home = fs.readFileSync(path.join(ROOT, 'apps/web/src/app/page.tsx'), 'utf8');
   const library = fs.readFileSync(
     path.join(ROOT, 'apps/web/src/components/LibraryClient.tsx'),
     'utf8',
@@ -732,10 +750,26 @@ test('every score has a centered artwork treatment while Lady Macbeth keeps its 
   assert.match(styles, /grid-template-columns: var\(--lanes\)/);
   assert.match(styles, /align-right\.line-active/);
   assert.match(styles, /align-left\.line-active/);
-  assert.match(dedicatedRoute, /defaultScoreId="lady-macbeth-macbeth"/);
-  assert.match(dedicatedRoute, /defaultVoiceConfig="separated"/);
-  assert.match(library, /'\/scores\/lady-macbeth-macbeth\/'/);
+  assert.match(styles, /width: calc\(100% - 3px\)/);
+  assert.match(scoreRoute, /generateStaticParams/);
+  for (const id of Object.keys(SCORE_ARTWORKS)) assert.match(scoreRoute, new RegExp(id));
+  assert.match(scoreRoute, /defaultVoiceConfig="separated"/);
+  assert.match(library, /const href = `\/scores\/\$\{encodeURIComponent\(c\.score\.id\)\}\/`/);
+  assert.match(library, /data-tracker-alias=\{trackerHref\}/);
   assert.match(library, /`\/tracker\?score=\$\{encodeURIComponent\(c\.score\.id\)\}`/);
+  assert.match(home, /scores\/\$\{score\.id\}/);
+  assert.match(home, /contemporary character poem by @two\.be/);
+  assert.deepEqual(DEFAULT_VOICE_CONFIGURATION_IDS, [
+    'natural',
+    'subtle',
+    'separated',
+    'theatrical',
+    'octave-split',
+  ]);
+  for (const [id, candidate] of Object.entries(allScores)) {
+    assert.equal(candidate.defaultVoiceConfiguration, 'separated', `${id} default treatment`);
+    assert.equal(resolveVoiceConfigurationId(candidate), 'separated', `${id} resolved treatment`);
+  }
   assert.match(standaloneBuilder, /ARTWORK_RELATIVE_PATHS/);
   assert.match(standaloneBuilder, /data:\$\{mimeType\(file\)\};base64/);
 
@@ -761,6 +795,15 @@ test('every score has a centered artwork treatment while Lady Macbeth keeps its 
   assert.equal(other.artwork.hidden, false);
   assert.match(other.artwork.innerHTML, /philip-glass-abstract-composition-1994\.webp/);
   assert.equal(other.root.dataset.artwork, 'philip-glass-abstract-composition-1994');
+  assert.equal(other.voiceConfigSelect.value, 'separated');
+  assert.deepEqual(
+    other.voiceConfigSelect.children.map((option) => option.value),
+    DEFAULT_VOICE_CONFIGURATION_IDS,
+  );
+  await emitTrackerClick(other.ui.get('.t-play'));
+  assert.equal(other.starts.length, score.events.length);
+  assert.equal(other.starts[0].detune, 28);
+  assert.equal(other.starts[1].detune, -28);
   other.mounted.destroy();
 });
 

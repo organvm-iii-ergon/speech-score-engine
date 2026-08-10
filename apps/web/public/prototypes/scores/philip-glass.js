@@ -148,6 +148,7 @@
       alt: 'Abstract Composition, 1994, by Harrie A. Gerritz',
     },
     tempo: 3,
+    defaultVoiceConfiguration: 'separated',
     lanes: LANES,
     sections: {
       readable: [0, 24],

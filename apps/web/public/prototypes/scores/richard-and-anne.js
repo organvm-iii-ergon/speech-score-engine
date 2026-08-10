@@ -75,6 +75,7 @@
       alt: 'Portrait of a Woman, circa 1590, anonymous Northern Netherlands artist',
     },
     tempo: 2.5,
+    defaultVoiceConfiguration: 'separated',
     lanes: LANES,
     sections: { duel: [0, total - 1] },
     total,

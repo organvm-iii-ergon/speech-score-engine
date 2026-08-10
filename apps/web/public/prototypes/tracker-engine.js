@@ -50,9 +50,18 @@
     '<div class="count t-count"></div>',
   ].join('\n');
 
+  const DEFAULT_VOICE_CONFIGURATION_IDS = [
+    'natural',
+    'subtle',
+    'separated',
+    'theatrical',
+    'octave-split',
+  ];
+
   function mount(root, opts) {
     const SC = opts.score;
     const VOICE_CONFIG_IDS = Object.keys(SC.voiceConfigurations || {});
+    if (!VOICE_CONFIG_IDS.length) VOICE_CONFIG_IDS.push(...DEFAULT_VOICE_CONFIGURATION_IDS);
     const requestedVoiceConfig = VOICE_CONFIG_IDS.includes(opts.voiceConfig)
       ? opts.voiceConfig
       : null;
@@ -60,16 +69,15 @@
       requestedVoiceConfig ||
       (VOICE_CONFIG_IDS.includes(SC.defaultVoiceConfiguration)
         ? SC.defaultVoiceConfiguration
-        : VOICE_CONFIG_IDS[0]) ||
+        : VOICE_CONFIG_IDS.includes('separated')
+          ? 'separated'
+          : VOICE_CONFIG_IDS[0]) ||
       null;
     const configuredPack = VOICE_CONFIG
       ? opts.voicePack?.configurations?.[VOICE_CONFIG]
       : opts.voicePack;
-    const defaultAliasPack =
-      VOICE_CONFIG === SC.defaultVoiceConfiguration && opts.voicePack?.clips
-        ? opts.voicePack
-        : null;
-    const activePack = configuredPack || defaultAliasPack;
+    const activePack = configuredPack || (opts.voicePack?.clips ? opts.voicePack : null);
+    const hasGeneratedVoiceConfiguration = Boolean(configuredPack?.clips);
     const CLIPS = activePack?.clips || opts.clips || null;
     const TIMINGS = activePack?.timings || opts.timings || null;
     const configurationAware = VOICE_CONFIG_IDS.length > 0;
@@ -142,6 +150,19 @@
       };
       VOX[l.id] = l.speech || { pitch: 1.0, rate: 1.0, prefer: [] };
     }
+    const runtimeTreatmentCents = (channel) => {
+      if (hasGeneratedVoiceConfiguration) return 0;
+      const amountByConfiguration = {
+        natural: 0,
+        subtle: 14,
+        separated: 28,
+        theatrical: 48,
+        'octave-split': 600,
+      };
+      const amount = amountByConfiguration[VOICE_CONFIG] || 0;
+      const pan = CHVOX[channel]?.pan || 0;
+      return pan < 0 ? amount : pan > 0 ? -amount : 0;
+    };
     const EV = SC.events;
     const rand = (a, b) => a + Math.random() * (b - a);
 
@@ -266,7 +287,7 @@
         const v = VOICE_ASSIGN[ch];
         if (v) u.voice = v;
         const spec = VOX[ch];
-        u.pitch = spec.pitch;
+        u.pitch = Math.max(0.1, Math.min(2, spec.pitch * 2 ** (runtimeTreatmentCents(ch) / 1200)));
         u.rate = Math.min(2.2, spec.rate * Math.max(1, tempoBps / 3));
         u.volume = 1;
         synth.speak(u);
@@ -314,7 +335,7 @@
       const osc = ctx.createOscillator();
       const env = ctx.createGain();
       osc.type = spec.t;
-      osc.frequency.setValueAtTime(spec.f, when);
+      osc.frequency.setValueAtTime(spec.f * 2 ** (runtimeTreatmentCents(channel) / 1200), when);
       env.gain.setValueAtTime(0.0001, when);
       env.gain.exponentialRampToValueAtTime(0.2, when + 0.015);
       env.gain.exponentialRampToValueAtTime(0.0001, when + 0.34);
@@ -422,7 +443,10 @@
       const spec = CHVOX[channel] || { pan: 0, rate: 1, gain: 1 };
       const src = ctx.createBufferSource();
       src.buffer = clip.buffer;
-      if (src.detune) src.detune.value = deterministic ? 0 : rand(-8, 8);
+      if (src.detune) {
+        const treatment = runtimeTreatmentCents(channel);
+        src.detune.value = deterministic ? treatment : treatment + rand(-8, 8);
+      }
       // trim window within the buffer, and the audible portion (in BUFFER seconds) that remains
       const dur = clip.buffer.duration;
       const start = Math.max(
@@ -471,7 +495,7 @@
       // subtle pitch LFO — the "low-frequency oscillation"; kept small so speech stays natural
       let lfo = null;
       let lfoGain = null;
-      if (src.detune && !deterministic) {
+      if (src.detune && !deterministic && !runtimeTreatmentCents(channel)) {
         lfo = ctx.createOscillator();
         lfo.type = 'sine';
         lfo.frequency.value = rand(4.5, 6.5);

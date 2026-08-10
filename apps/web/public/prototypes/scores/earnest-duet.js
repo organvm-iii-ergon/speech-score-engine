@@ -66,6 +66,7 @@
       alt: 'The Bridge, De brug, 1895, by Marius Bauer',
     },
     tempo: 2,
+    defaultVoiceConfiguration: 'separated',
     lanes: LANES,
     sections: { scene: [0, total - 1] },
     total,

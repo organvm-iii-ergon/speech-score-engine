@@ -120,16 +120,15 @@ export function LibraryClient() {
         }}
       >
         {cards?.map((c) => {
-          // Keep the original tracker query URL as a stable share alias while giving Lady Macbeth
-          // a canonical, descriptive route of its own.
+          // Keep each original tracker query URL as a stable share alias while giving every score a
+          // canonical, descriptive route of its own.
           const trackerHref = `/tracker?score=${encodeURIComponent(c.score.id)}`;
-          const href =
-            c.score.id === 'lady-macbeth-macbeth' ? '/scores/lady-macbeth-macbeth/' : trackerHref;
+          const href = `/scores/${encodeURIComponent(c.score.id)}/`;
           return (
             <a
               key={c.score.id}
               href={href}
-              data-tracker-alias={c.score.id === 'lady-macbeth-macbeth' ? trackerHref : undefined}
+              data-tracker-alias={trackerHref}
               style={{
                 display: 'flex',
                 flexDirection: 'column',

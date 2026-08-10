@@ -1,7 +1,23 @@
+// Every tracker score gets the same treatment vocabulary. Scores with generated alternate packs
+// resolve those IDs to their rendered files; scores with a single top-level pack keep that audio
+// and apply the treatment in the shared Web Audio engine.
+export const DEFAULT_VOICE_CONFIGURATION_IDS = [
+  'natural',
+  'subtle',
+  'separated',
+  'theatrical',
+  'octave-split',
+];
+
+export const hasRenderedVoiceConfigurations = (score) =>
+  score?.voiceConfigurations &&
+  typeof score.voiceConfigurations === 'object' &&
+  Object.keys(score.voiceConfigurations).length > 0;
+
 export const voiceConfigurationIds = (score) =>
-  score?.voiceConfigurations && typeof score.voiceConfigurations === 'object'
+  hasRenderedVoiceConfigurations(score)
     ? Object.keys(score.voiceConfigurations)
-    : [];
+    : [...DEFAULT_VOICE_CONFIGURATION_IDS];
 
 export const resolveVoiceConfigurationId = (score, requested) => {
   const ids = voiceConfigurationIds(score);
@@ -15,12 +31,18 @@ export const resolveVoiceConfigurationId = (score, requested) => {
 
 export function selectVoicePackConfiguration(score, voicePack, requested, options = {}) {
   const ids = voiceConfigurationIds(score);
+  const renderedConfigurations = hasRenderedVoiceConfigurations(score);
   if (options.strict && requested && !ids.includes(requested)) {
     throw new Error(
       `Unknown voice configuration ${JSON.stringify(requested)} for score ${JSON.stringify(score.id)}.`,
     );
   }
   const id = resolveVoiceConfigurationId(score, requested);
+  if (!renderedConfigurations) {
+    if (!voicePack?.clips)
+      throw new Error(`Voice pack ${JSON.stringify(score.id)} did not register clips.`);
+    return { id, clips: voicePack.clips, timings: voicePack.timings || {} };
+  }
   if (!id) {
     if (!voicePack?.clips)
       throw new Error(`Voice pack ${JSON.stringify(score.id)} did not register clips.`);

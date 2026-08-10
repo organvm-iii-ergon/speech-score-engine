@@ -101,6 +101,7 @@
       alt: 'Cows in a Stable; Witches in the Four Corners, 1615, by Roelant Savery',
     },
     tempo: 2.5,
+    defaultVoiceConfiguration: 'separated',
     lanes: LANES,
     sections: {
       summons: [bounds.summons[0], bounds.summons[1] + 2],
