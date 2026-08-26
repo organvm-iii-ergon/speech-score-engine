@@ -2,6 +2,7 @@
 
 import { loadScript } from '@/lib/loadScript';
 import { ENGINE_SCRIPT, SCORE_SCRIPTS } from '@/lib/scoreScripts';
+import { resolveVoiceConfigurationId } from '@/lib/voiceConfigurations';
 import type { Score, TrackerHandle } from '@/types/sse';
 import { useEffect, useRef } from 'react';
 
@@ -35,14 +36,25 @@ export function TrackerClient() {
       if (!score) return;
       await loadScript(`/prototypes/voices/${id}.js`);
       if (cancelled) return;
-      const clips = window.SSE_VOICES?.[id]?.clips ?? null;
+      const voicePack = window.SSE_VOICES?.[id];
+      const requestedVoiceConfig = new URLSearchParams(window.location.search).get('voiceConfig');
+      const voiceConfig = resolveVoiceConfigurationId(score, requestedVoiceConfig);
       handle = engine.mount(el, {
         score,
-        clips,
+        voicePack: voicePack ?? null,
+        voiceConfig,
+        clips: voicePack?.clips ?? null,
+        timings: voicePack?.timings ?? null,
         scores: Object.values(scores),
         onPick: (nextId: string) => {
           const params = new URLSearchParams(window.location.search);
           params.set('score', nextId);
+          params.delete('voiceConfig');
+          window.location.search = params.toString();
+        },
+        onVoiceConfig: (nextId: string) => {
+          const params = new URLSearchParams(window.location.search);
+          params.set('voiceConfig', nextId);
           window.location.search = params.toString();
         },
       });

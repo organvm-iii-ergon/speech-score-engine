@@ -84,6 +84,14 @@
 .sse .heads .h.live {
   color: var(--accent);
 }
+.sse .heads .h.align-right {
+  text-align: right;
+  padding-right: clamp(12px, 3vw, 48px);
+  padding-left: 0;
+}
+.sse .heads .h.align-left {
+  padding-left: clamp(12px, 3vw, 48px);
+}
 .sse .heads .h.live::after {
   content: " ●";
   font-size: 0.7em;
@@ -206,6 +214,16 @@
   position: relative;
   padding-left: 4px;
   min-width: 0;
+}
+.sse .cell.align-right {
+  display: flex;
+  justify-content: flex-end;
+  padding-right: clamp(12px, 3vw, 48px);
+  padding-left: 0;
+  text-align: right;
+}
+.sse .cell.align-left {
+  padding-left: clamp(12px, 3vw, 48px);
 }
 .sse .word {
   display: inline-block;
@@ -341,4 +359,22 @@
   flex: 1;
   accent-color: #cdbf9a;
   height: 2px;
+}
+.sse .voice-config {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(233, 230, 220, 0.42);
+}
+.sse .voice-config select {
+  font-family: var(--serif);
+  font-size: 11px;
+  padding: 5px 8px;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  background: #101012;
+  color: var(--ink);
 }

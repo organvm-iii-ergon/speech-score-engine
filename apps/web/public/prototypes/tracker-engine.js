@@ -21,6 +21,8 @@
     '<div class="caption t-caption"></div>',
     '<div class="transport">',
     '  <div class="trow"><div class="seg t-scores"></div></div>',
+    '  <div class="trow t-voice-config-row"><label class="voice-config">Voice treatment',
+    '    <select class="t-voice-config"></select></label></div>',
     '  <div class="tempo"><label>Tempo</label>',
     '    <input class="t-tempo" type="range" min="1" max="9" step="0.5" /></div>',
     '  <div class="trow">',
@@ -47,13 +49,41 @@
 
   function mount(root, opts) {
     const SC = opts.score;
-    const CLIPS = opts.clips || null;
+    const VOICE_CONFIG_IDS = Object.keys(SC.voiceConfigurations || {});
+    const requestedVoiceConfig = VOICE_CONFIG_IDS.includes(opts.voiceConfig)
+      ? opts.voiceConfig
+      : null;
+    const VOICE_CONFIG =
+      requestedVoiceConfig ||
+      (VOICE_CONFIG_IDS.includes(SC.defaultVoiceConfiguration)
+        ? SC.defaultVoiceConfiguration
+        : VOICE_CONFIG_IDS[0]) ||
+      null;
+    const configuredPack = VOICE_CONFIG
+      ? opts.voicePack?.configurations?.[VOICE_CONFIG]
+      : opts.voicePack;
+    const defaultAliasPack =
+      VOICE_CONFIG === SC.defaultVoiceConfiguration && opts.voicePack?.clips
+        ? opts.voicePack
+        : null;
+    const activePack = configuredPack || defaultAliasPack;
+    const CLIPS = activePack?.clips || opts.clips || null;
+    const TIMINGS = activePack?.timings || opts.timings || null;
+    const configurationAware = VOICE_CONFIG_IDS.length > 0;
     const ALL = opts.scores || [SC];
     const onPick =
       opts.onPick ||
       ((id) => {
         const p = new URLSearchParams(location.search);
         p.set('score', id);
+        p.delete('voiceConfig');
+        location.search = p.toString();
+      });
+    const onVoiceConfig =
+      opts.onVoiceConfig ||
+      ((id) => {
+        const p = new URLSearchParams(location.search);
+        p.set('voiceConfig', id);
         location.search = p.toString();
       });
 
@@ -119,13 +149,48 @@
       eventsByRow.get(ev.tick).push(ev);
     }
 
+    // A row-complete tracker is a two-player grid rather than a metronome: every lane in a row
+    // starts together, then the next row waits for the longest measured clip. The same Edge-TTS
+    // word-boundary record feeds the offline mix and reel, so this browser plan stays in phase.
+    const deriveRowCompletePlan = () => {
+      if (SC.playback !== 'row-complete' || !TIMINGS) return null;
+      const activeLanes = CH.filter((lane) => !isHuman(lane));
+      const rows = new Map();
+      for (const ev of EV) {
+        if (ev.silent || isHuman(ev.lane)) continue;
+        if (!rows.has(ev.tick)) rows.set(ev.tick, []);
+        rows.get(ev.tick).push(ev);
+      }
+      let cursor = 0;
+      const scheduledRows = [];
+      for (const [tick, events] of [...rows.entries()].sort(([left], [right]) => left - right)) {
+        if (events.length !== activeLanes.length) return null;
+        const ids = new Set(events.map((ev) => ev.lane));
+        if (activeLanes.some((lane) => !ids.has(lane))) return null;
+        const clips = events.map((ev) => {
+          const timing = TIMINGS[`${ev.lane}|${ev.speechText || ev.text}`];
+          if (!Number.isFinite(timing?.duration) || timing.duration <= 0) return null;
+          return { ev, timing };
+        });
+        if (clips.some((clip) => clip === null)) return null;
+        const duration = Math.max(...clips.map((clip) => clip.timing.duration));
+        scheduledRows.push({ tick, start: cursor, end: cursor + duration, events });
+        cursor += duration;
+      }
+      return scheduledRows.length ? { duration: cursor, rows: scheduledRows } : null;
+    };
+    const rowCompletePlan = deriveRowCompletePlan();
+
     // ---- audio ----
     let silent = false;
     let soundMode = 'voice';
-    let tempoBps = SC.tempo || 3; // musical tempo — beats per second (what the Tempo slider sets)
+    const scoreTempoBps = SC.tempo || 3;
+    let tempoBps = scoreTempoBps; // musical tempo — beats per second (what the Tempo slider sets)
     let rps = tempoBps * SUBDIV; // transport grid steps (ticks) per second = tempo × subdivision
     const muted = new Set(); // lanes silenced via a header click (still illuminate)
     const soloed = new Set(); // lanes soloed via ⌥/Alt-click — when any is set, only these sound
+    const laneIsAudible = (lane) =>
+      !silent && !isHuman(lane) && (soloed.size ? soloed.has(lane) : !muted.has(lane));
 
     // -- source A: Web Speech API (fallback when no neural clips are present) --
     const synth = window.speechSynthesis || null;
@@ -158,7 +223,10 @@
     const speak = (events) => {
       if (!synth) return false;
       const seen = new Map();
-      for (const ev of events) if (!seen.has(ev.text)) seen.set(ev.text, ev.lane);
+      for (const ev of events) {
+        const text = ev.speechText || ev.text;
+        if (!seen.has(text)) seen.set(text, ev.lane);
+      }
       synth.resume();
       if (synth.pending) synth.cancel();
       for (const [text, ch] of seen) {
@@ -192,6 +260,11 @@
         return false;
       }
     };
+    const refreshMasterAudibility = () => {
+      if (!ctx || !master) return;
+      master.gain.cancelScheduledValues(ctx.currentTime);
+      master.gain.setValueAtTime(silent ? 0 : 0.9, ctx.currentTime);
+    };
     const tone = (channel, when) => {
       if (!ctx || !master) return;
       const spec = TONES[channel];
@@ -203,17 +276,56 @@
       env.gain.exponentialRampToValueAtTime(0.2, when + 0.015);
       env.gain.exponentialRampToValueAtTime(0.0001, when + 0.34);
       osc.connect(env);
-      env.connect(master);
+      let panner = null;
+      if (ctx.createStereoPanner) {
+        panner = ctx.createStereoPanner();
+        panner.pan.value = CHVOX[channel]?.pan || 0;
+        env.connect(panner);
+        panner.connect(master);
+      } else {
+        env.connect(master);
+      }
       osc.start(when);
       osc.stop(when + 0.4);
       osc.onended = () => {
         osc.disconnect();
         env.disconnect();
+        if (panner) panner.disconnect();
       };
     };
 
+    const fallbackVoice = (events) => {
+      if (!events.length) return false;
+      if (!configurationAware) return Boolean(synth && speak(events));
+      if (!ensureCtx() || !ctx) return false;
+      for (const ev of events) tone(ev.lane, ctx.currentTime);
+      return true;
+    };
+
     // -- source 0: pre-rendered neural clips as Web Audio buffers --
-    const SAMP = { buf: new Map(), ready: false, loading: false };
+    // `loading` retains the decode promise so a later transport action can await the same work
+    // instead of racing ahead without clips.
+    const SAMP = { buf: new Map(), ready: false, loading: null };
+    // Keep the lane gate with every long-running buffer source. Header changes can then mute or
+    // solo an already-playing continuous passage without waiting for it to loop or retrigger.
+    const activeSources = new Map();
+    const stopSamples = () => {
+      for (const source of activeSources.keys()) {
+        try {
+          source.stop();
+        } catch (err) {
+          /* source already ended */
+        }
+      }
+      activeSources.clear();
+    };
+    const refreshActiveSourceAudibility = () => {
+      if (!ctx) return;
+      for (const { lane, gate } of activeSources.values()) {
+        gate.gain.cancelScheduledValues(ctx.currentTime);
+        gate.gain.setValueAtTime(laneIsAudible(lane) ? 1 : 0, ctx.currentTime);
+      }
+    };
     const b64ToBuf = (b64) => {
       const bin = atob(b64);
       const u8 = new Uint8Array(bin.length);
@@ -229,47 +341,67 @@
       const off = i / buffer.sampleRate - 0.02;
       return off > 0 ? off : 0;
     };
-    const loadSamples = async () => {
-      if (SAMP.ready || SAMP.loading) return SAMP.ready;
-      if (!CLIPS || !ensureCtx() || !ctx) return false;
-      SAMP.loading = true;
-      await Promise.all(
+    const loadSamples = () => {
+      if (SAMP.ready) return Promise.resolve(true);
+      if (SAMP.loading) return SAMP.loading;
+      if (!CLIPS || !ensureCtx() || !ctx) return Promise.resolve(false);
+      SAMP.loading = Promise.all(
         Object.entries(CLIPS).map(async ([key, b64]) => {
           try {
             const buffer = await ctx.decodeAudioData(b64ToBuf(b64));
-            SAMP.buf.set(key, { buffer, offset: leadOffset(buffer) });
+            // A timed clip keeps its source pre-roll because its generated word boundaries are
+            // measured from that exact stream. Untimed legacy clips retain the immediate-start trim.
+            SAMP.buf.set(key, { buffer, offset: TIMINGS?.[key] ? 0 : leadOffset(buffer) });
           } catch (err) {
             /* skip an undecodable clip */
           }
         }),
-      );
-      SAMP.ready = SAMP.buf.size > 0;
-      SAMP.loading = false;
-      return SAMP.ready;
+      )
+        .then(() => {
+          SAMP.ready = SAMP.buf.size > 0;
+          return SAMP.ready;
+        })
+        .finally(() => {
+          SAMP.loading = null;
+        });
+      return SAMP.loading;
     };
     // Play one line on one lane: that character's own neural clip, humanized + panned. Per-clip
     // AUDIO CRAFT (L6) is honored straight from the event: trimStart/trimEnd (seconds off head/tail),
     // gain (level multiplier), fadeIn/fadeOut (seconds). Absent params → the original behaviour.
     const playSample = (ev, when) => {
       const channel = ev.lane;
-      const clip = SAMP.buf.get(`${channel}|${ev.text}`) || SAMP.buf.get(ev.text);
+      const speechText = ev.speechText || ev.text;
+      const timingKey = `${channel}|${speechText}`;
+      const deterministic = Boolean(TIMINGS?.[timingKey]);
+      const clip = SAMP.buf.get(`${channel}|${speechText}`) || SAMP.buf.get(speechText);
       if (!clip || !ctx || !master) return false;
       const spec = CHVOX[channel] || { pan: 0, rate: 1, gain: 1 };
       const src = ctx.createBufferSource();
       src.buffer = clip.buffer;
-      if (src.detune) src.detune.value = rand(-8, 8);
+      if (src.detune) src.detune.value = deterministic ? 0 : rand(-8, 8);
       // trim window within the buffer, and the audible portion (in BUFFER seconds) that remains
       const dur = clip.buffer.duration;
-      const start = Math.max(0, (clip.offset || 0) + (ev.trimStart || 0));
-      const srcDur = Math.max(0.02, dur - start - (ev.trimEnd || 0));
+      const start = Math.max(
+        0,
+        (clip.offset || 0) + (ev.trimStart || 0) + (ev.sectionTrimStart || 0),
+      );
+      const untrimmedEnd = typeof ev.timingEnd === 'number' ? Math.min(dur, ev.timingEnd) : dur;
+      const sourceEnd = untrimmedEnd - Math.max(0, ev.trimEnd || 0);
+      const srcDur = Math.max(0.02, sourceEnd - start);
       // WARP: stretch the clip to fill its beat-length on the grid. `warp` off → play the recorded
       // length at natural pitch (place-and-play). `warp` on → the same knob that locks a word to the
       // beat also, pushed far, distorts its natural voice "into madness": playbackRate repitches as
       // it stretches (Ableton's Repitch warp). Pitch-preserving warp is a later tier.
       const beatsPerSec = SUBDIV ? rps / SUBDIV : rps;
-      let rate = spec.rate * rand(0.997, 1.003);
+      const transportRate =
+        typeof ev.transportRate === 'number' && ev.transportRate > 0 ? ev.transportRate : 1;
+      let rate = spec.rate * transportRate * (deterministic ? 1 : rand(0.997, 1.003));
       let outDur = srcDur / rate; // wall-clock output seconds (place-and-play)
-      if (ev.warp && beatsPerSec > 0) {
+      // A continuous passage owns a clip-derived visual clock. Its transportRate keeps the
+      // sound in phase with that clock, so repitch Warp is unavailable for that source rather
+      // than replacing the timed rate with its unrelated one-beat grid calculation.
+      if (ev.warp && beatsPerSec > 0 && typeof ev.transportRate !== 'number') {
         const target = Math.max(0.05, evBeats(ev) / beatsPerSec);
         rate = Math.min(8, Math.max(0.1, srcDur / target));
         outDur = target;
@@ -296,7 +428,7 @@
       // subtle pitch LFO — the "low-frequency oscillation"; kept small so speech stays natural
       let lfo = null;
       let lfoGain = null;
-      if (src.detune) {
+      if (src.detune && !deterministic) {
         lfo = ctx.createOscillator();
         lfo.type = 'sine';
         lfo.frequency.value = rand(4.5, 6.5);
@@ -308,52 +440,79 @@
         for (const n of nodes) n.disconnect();
         if (lfo) lfo.stop();
       };
+      const laneGate = ctx.createGain();
+      laneGate.gain.value = laneIsAudible(channel) ? 1 : 0;
       src.connect(g);
-      let tail = [src, g];
+      g.connect(laneGate);
+      let tail = [src, g, laneGate];
       if (ctx.createStereoPanner) {
         const p = ctx.createStereoPanner();
         p.pan.value = spec.pan;
-        g.connect(p);
+        laneGate.connect(p);
         p.connect(master);
-        tail = [src, g, p];
+        tail = [src, g, laneGate, p];
       } else {
-        g.connect(master);
+        laneGate.connect(master);
       }
       if (lfoGain) tail = tail.concat([lfoGain]);
-      src.onended = cleanup(tail);
+      const cleanupSource = cleanup(tail);
+      src.onended = () => {
+        activeSources.delete(src);
+        cleanupSource();
+      };
+      activeSources.set(src, { lane: channel, gate: laneGate });
       src.start(t, start, playDur);
       if (lfo) lfo.start(t);
       return true;
     };
 
     const voice = (events) => {
-      if (silent || !events || !events.length) return;
+      if (!events || !events.length) return;
       // Audibility, one decision: never a human lane; when any lane is soloed only soloed lanes
       // sound (solo overrides mute, the DAW convention); otherwise everything unmuted sounds.
-      const audible = events.filter((ev) => {
-        if (isHuman(ev.lane)) return false;
-        return soloed.size ? soloed.has(ev.lane) : !muted.has(ev.lane);
-      });
-      if (!audible.length) return;
+      const eligible = events.filter((ev) => !ev.silent && !isHuman(ev.lane));
+      const audible = eligible.filter((ev) => laneIsAudible(ev.lane));
+      if (!eligible.length) return;
       if (soundMode === 'voice') {
         if (CLIPS) {
           if (SAMP.ready) {
             const base = ctx.currentTime + 0.015;
             let any = false;
+            const missing = [];
+            // Start only audible pre-rendered lanes. A muted matching clip must not prevent an
+            // edited audible line from using the Web Speech fallback.
             for (const ev of audible) {
-              if (playSample(ev, base + rand(0, 0.028))) any = true;
+              const key = `${ev.lane}|${ev.speechText || ev.text}`;
+              const stagger = TIMINGS?.[key] ? 0 : rand(0, 0.028);
+              const scheduled = Math.max(
+                0,
+                typeof ev.scheduleSeconds === 'number' ? ev.scheduleSeconds : 0,
+              );
+              if (playSample(ev, base + scheduled + stagger)) any = true;
+              else missing.push(ev);
             }
-            if (any) return;
-            // a clip pack is loaded but none matched (e.g. text edited in the editor) -> speak it
-            if (synth && speak(audible)) return;
+            // A pack can match only some audible lines after an edit. Fall back only for the
+            // unmatched audible subset; never let a silent lane consume that decision.
+            if (missing.length && fallbackVoice(missing)) return;
+            if (any) {
+              // Web Speech is optional. Keep the final Web Audio fallback audible for only the
+              // unmatched lines rather than adding duplicate tones beneath matched clips.
+              if (missing.length && ensureCtx() && ctx) {
+                for (const ev of missing) tone(ev.lane, ctx.currentTime);
+              }
+              return;
+            }
+            // a clip pack is loaded but no audible clip matched (e.g. text edited in the editor)
+            if (audible.length && fallbackVoice(audible)) return;
           } else {
             loadSamples();
             return;
           }
-        } else if (synth && speak(audible)) {
+        } else if (audible.length && fallbackVoice(audible)) {
           return;
         }
       }
+      if (!audible.length) return;
       if (!ensureCtx() || !ctx) return;
       const now = ctx.currentTime;
       for (const ev of audible) tone(ev.lane, now);
@@ -370,7 +529,8 @@
     heads.appendChild(gh);
     for (const c of CH) {
       const el = document.createElement('div');
-      el.className = `h${isHuman(c) ? ' live' : ''}`;
+      const align = laneById.get(c)?.align;
+      el.className = `h${isHuman(c) ? ' live' : ''}${align ? ` align-${align}` : ''}`;
       el.textContent = HEAD[c];
       el.dataset.lane = c;
       el.title = 'click = mute · ⌥/Alt-click = solo';
@@ -390,7 +550,8 @@
       row.appendChild(num);
       for (const c of CH) {
         const cell = document.createElement('div');
-        cell.className = 'cell';
+        const align = laneById.get(c)?.align;
+        cell.className = `cell${align ? ` align-${align}` : ''}`;
         cellRef.set(`${r}:${c}`, cell);
         row.appendChild(cell);
       }
@@ -406,6 +567,60 @@
       cell.appendChild(span);
       ev.el = span;
     }
+
+    // Continuous-passage scores can show many visual lines while triggering one full voice clip.
+    // Map those lines to the word boundaries captured with that exact clip, lane by lane. A normal
+    // line-per-clip score does not opt into this path and keeps the metronome-row illumination.
+    const textTokens = (value) =>
+      (
+        String(value)
+          .toLowerCase()
+          .match(/[\p{L}\p{N}]+/gu) || []
+      ).map((word) => word.normalize('NFKC'));
+    const deriveTimedCues = () => {
+      if (!TIMINGS || !EV.some((ev) => ev.speechText)) return null;
+      const allCues = [];
+      for (const lane of CH) {
+        const visibleLaneEvents = EV.filter((ev) => ev.lane === lane && ev.el);
+        // Adding an unused editor lane or an ordinary clip must not discard timing for a populated
+        // continuous passage. A lane that retains silent continuations without a source is corrupt.
+        if (!visibleLaneEvents.length) continue;
+        const sourceEvent = EV.find((ev) => ev.lane === lane && ev.speechText && !ev.silent);
+        if (!sourceEvent) {
+          if (visibleLaneEvents.some((ev) => ev.silent)) return null;
+          continue;
+        }
+        const laneEvents = visibleLaneEvents
+          .filter((ev) => ev === sourceEvent || ev.silent)
+          .sort((a, b) => a.tick - b.tick);
+        const timing = sourceEvent ? TIMINGS[`${lane}|${sourceEvent.speechText}`] : null;
+        if (!Array.isArray(timing?.words)) return null;
+        const words = timing.words;
+        let cursor = 0;
+        const laneCues = [];
+        for (const ev of laneEvents) {
+          const expected = textTokens(ev.text);
+          const actual = words.slice(cursor, cursor + expected.length);
+          if (
+            !expected.length ||
+            expected.join('|') !== actual.map((word) => textTokens(word.text)[0]).join('|')
+          ) {
+            return null;
+          }
+          cursor += expected.length;
+          laneCues.push({ ev, start: actual[0].start, spokenEnd: actual.at(-1).end });
+        }
+        if (cursor !== words.length) return null;
+        laneCues.forEach((cue, index) => {
+          allCues.push({
+            ...cue,
+            end: laneCues[index + 1]?.start ?? cue.spokenEnd + 0.08,
+          });
+        });
+      }
+      return allCues;
+    };
+    const timedCues = deriveTimedCues();
 
     // ---- score picker + section chips ----
     const scoresSeg = q('.t-scores');
@@ -423,6 +638,25 @@
     };
     scoresSeg.addEventListener('click', onScorePick);
 
+    const voiceConfigRow = q('.t-voice-config-row');
+    const voiceConfigSelect = q('.t-voice-config');
+    if (!voiceConfigRow || !voiceConfigSelect) {
+      /* a minimal host may omit the optional selector */
+    } else if (!VOICE_CONFIG_IDS.length) {
+      voiceConfigRow.style.display = 'none';
+    } else {
+      for (const id of VOICE_CONFIG_IDS) {
+        const option = document.createElement('option');
+        option.value = id;
+        option.textContent = id
+          .split('-')
+          .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+          .join(' ');
+        voiceConfigSelect.appendChild(option);
+      }
+      voiceConfigSelect.value = VOICE_CONFIG;
+    }
+
     const sections = q('.t-sections');
     for (const key of Object.keys(SECTIONS)) {
       const b = document.createElement('button');
@@ -438,7 +672,11 @@
 
     // ---- state + transport ----
     let playing = false;
+    let starting = false;
+    let destroyed = false;
+    let playGeneration = 0;
     let currentRow = 0;
+    let hasStruckCurrent = false;
     let sel = 'full';
     let rafId = null;
     let lastTs = 0;
@@ -447,25 +685,54 @@
     let visibleRows = 24;
     let hereEl = null;
     let nowWords = [];
+    let timedStartTs = null;
+    let timedLaneOffsets = new Map();
+    let timedPassageDuration = 0;
+    let timedTempoScale = 1;
+    let rowCompleteOffset = 0;
+    // A timed Tones performance sounds each visible lane line once. Store event identities rather
+    // than rows: simultaneous lanes and silent continuation rows each carry their own cue.
+    let timedToneCues = new Set();
+    // A new timed run invalidates any delayed Voice-mode resume from the preceding run.
+    let timedRunGeneration = 0;
+    let timedVoiceResumeGeneration = 0;
     // L5 — live human+AI performance
     let cue = false; // cue mode: a human drives the pace (Space advances), AI answers on its rows
     let cued = false; // has the first line been struck since (re)entering cue mode
+    let cueAdvancePending = false; // one input may wait for decoding; later strikes must not skip
     let countin = false; // 3·2·1 pre-roll before a metronome performance
     let counting = false;
     let countTimer = null;
     let midi = null; // Web MIDI access (lazy — requested on first cue entry; best-effort)
     let midiInputs = [];
+    const cancelPendingPlay = () => {
+      playGeneration += 1;
+      starting = false;
+    };
+    const playRequestIsCurrent = (generation) =>
+      !destroyed && !cue && generation === playGeneration;
 
     const measure = () => {
       rowH = rowEls[0] ? rowEls[0].offsetHeight : 26;
       visibleRows = Math.max(8, Math.floor(viewport.clientHeight / rowH));
     };
     const range = () => (sel === 'full' ? [0, TOTAL - 1] : SECTIONS[sel]);
+    // Timed sections are authored as half-open spans. Keep the legacy inclusive range untouched,
+    // but use the score's full tick count as the exclusive end for continuous-passage transport.
+    const timedRange = () => (sel === 'full' ? [0, TOTAL] : SECTIONS[sel]);
     const clearPerformed = () => {
+      timedRunGeneration += 1;
+      timedVoiceResumeGeneration += 1;
       for (const ev of EV) {
         if (ev.el) ev.el.classList.remove('spoken', 'now');
       }
       nowWords = [];
+      timedStartTs = null;
+      timedLaneOffsets = new Map();
+      timedPassageDuration = 0;
+      timedTempoScale = 1;
+      rowCompleteOffset = 0;
+      timedToneCues = new Set();
     };
     const renderRow = (row) => {
       if (hereEl) hereEl.classList.remove('here');
@@ -478,6 +745,7 @@
       track.style.transform = `translateY(${-off}px)`;
     };
     const illuminate = (row) => {
+      if (timedCues) return;
       for (const w of nowWords) w.classList.remove('now');
       nowWords = [];
       const evs = eventsByRow.get(row);
@@ -490,15 +758,287 @@
         nowWords.push(ev.el);
       }
     };
+    const illuminateRowComplete = (timestamp) => {
+      if (!rowCompletePlan || timedStartTs === null) return;
+      const elapsed = Math.max(0, (timestamp - timedStartTs) / 1000);
+      const [sectionStart, sectionEnd] = timedRange();
+      nowWords = [];
+      for (const row of rowCompletePlan.rows) {
+        const inSection = row.tick >= sectionStart && row.tick < sectionEnd;
+        const start = row.start - rowCompleteOffset;
+        const end = row.end - rowCompleteOffset;
+        const isNow = inSection && elapsed >= start && elapsed < end;
+        for (const ev of row.events) {
+          ev.el?.classList.toggle('now', isNow);
+          ev.el?.classList.toggle('spoken', inSection && elapsed >= end);
+          if (isNow && ev.el) nowWords.push(ev.el);
+          if (isNow && soundMode === 'tone' && !timedToneCues.has(ev)) {
+            timedToneCues.add(ev);
+            if (laneIsAudible(ev.lane) && ensureCtx() && ctx) tone(ev.lane, ctx.currentTime);
+          }
+        }
+        if (isNow && currentRow !== row.tick) {
+          currentRow = row.tick;
+          renderRow(row.tick);
+        }
+      }
+    };
+    const illuminateTimed = (timestamp) => {
+      if (!timedCues || timedStartTs === null) return;
+      const elapsed = Math.max(0, (timestamp - timedStartTs) / 1000) * timedTempoScale;
+      const [sectionStart, sectionEnd] = timedRange();
+      nowWords = [];
+      for (const cue of timedCues) {
+        const seconds = elapsed + (timedLaneOffsets.get(cue.ev.lane) || 0);
+        const inSection = cue.ev.tick >= sectionStart && cue.ev.tick < sectionEnd;
+        const isNow = inSection && seconds >= cue.start && seconds < cue.end;
+        cue.ev.el.classList.toggle('now', isNow);
+        cue.ev.el.classList.toggle('spoken', inSection && seconds >= cue.end);
+        if (isNow) nowWords.push(cue.ev.el);
+      }
+      playTimedTones(
+        timedCues.filter((cue) => {
+          const seconds = elapsed + (timedLaneOffsets.get(cue.ev.lane) || 0);
+          return (
+            cue.ev.tick >= sectionStart &&
+            cue.ev.tick < sectionEnd &&
+            seconds >= cue.start &&
+            seconds < cue.end
+          );
+        }),
+      );
+      if (nowWords.length) {
+        const activeRows = timedCues
+          .filter((cue) => nowWords.includes(cue.ev.el))
+          .map((cue) => cue.ev.tick);
+        const activeRow = Math.max(...activeRows);
+        if (activeRow !== currentRow) {
+          currentRow = activeRow;
+          renderRow(activeRow);
+        }
+      }
+    };
+    const playTimedTones = (cues) => {
+      if (soundMode !== 'tone') return;
+      if (!ensureCtx() || !ctx) return;
+      for (const cue of cues) {
+        if (timedToneCues.has(cue.ev)) continue;
+        timedToneCues.add(cue.ev);
+        if (laneIsAudible(cue.ev.lane)) tone(cue.ev.lane, ctx.currentTime);
+      }
+    };
+    const planTimedPassage = (sectionStart, sectionEnd, transportRate = 1) => {
+      if (!timedCues) return null;
+      const passageEvents = [];
+      const offsets = new Map();
+      let passageDuration = 0;
+      for (const lane of CH) {
+        const laneCues = timedCues
+          .filter((cue) => cue.ev.lane === lane)
+          .sort((a, b) => a.ev.tick - b.ev.tick);
+        const firstCue = laneCues.find(
+          (cue) => cue.ev.tick >= sectionStart && cue.ev.tick < sectionEnd,
+        );
+        if (!firstCue) continue;
+        const nextSectionCue = laneCues.find((cue) => cue.ev.tick >= sectionEnd);
+        const sourceEvent = EV.find((ev) => ev.lane === lane && ev.speechText && !ev.silent);
+        if (!sourceEvent) continue;
+        // Section trims are additional to the event's authored edit window; selecting a passage
+        // must not silently discard trimStart/trimEnd already present on the source event.
+        const sectionTrimStart = Math.max(0, firstCue.start - 0.06);
+        const trimStart = Math.max(0, (sourceEvent.trimStart || 0) + sectionTrimStart);
+        const untrimmedTimingEnd = nextSectionCue?.start ?? laneCues.at(-1).spokenEnd + 0.12;
+        const timingEnd = Math.max(trimStart + 0.02, untrimmedTimingEnd);
+        const composedEnd = timingEnd - Math.max(0, sourceEvent.trimEnd || 0);
+        passageEvents.push({
+          ...sourceEvent,
+          silent: false,
+          sectionTrimStart,
+          timingEnd,
+          transportRate,
+        });
+        offsets.set(lane, trimStart);
+        passageDuration = Math.max(passageDuration, composedEnd - trimStart);
+      }
+      if (!passageEvents.length || passageDuration <= 0) return null;
+      return { passageEvents, offsets, passageDuration };
+    };
+    const playTimedCueRow = (row) => {
+      if (!timedCues) return false;
+      const plan = planTimedPassage(row, row + 1);
+      if (!plan) return false;
+      const [sectionStart, sectionEnd] = timedRange();
+      nowWords = [];
+      for (const cue of timedCues) {
+        const inSection = cue.ev.tick >= sectionStart && cue.ev.tick < sectionEnd;
+        const isNow = inSection && cue.ev.tick === row;
+        cue.ev.el.classList.toggle('now', isNow);
+        cue.ev.el.classList.toggle('spoken', inSection && cue.ev.tick <= row);
+        if (isNow) nowWords.push(cue.ev.el);
+      }
+      stopSamples();
+      voice(plan.passageEvents);
+      return true;
+    };
     const advance = (row) => {
       currentRow = row;
+      hasStruckCurrent = true;
       renderRow(row);
+      if (timedCues && cue) {
+        playTimedCueRow(row);
+        return;
+      }
       illuminate(row);
       const evs = eventsByRow.get(row);
-      if (evs) voice(evs);
+      if (evs && !timedCues) voice(evs);
+    };
+    const startRowCompletePassage = () => {
+      if (!rowCompletePlan) return false;
+      const [sectionStart, sectionEnd] = timedRange();
+      const rows = rowCompletePlan.rows.filter(
+        (row) => row.tick >= sectionStart && row.tick < sectionEnd,
+      );
+      if (!rows.length) return false;
+      timedRunGeneration += 1;
+      rowCompleteOffset = rows[0].start;
+      timedTempoScale = 1;
+      timedPassageDuration = rows.at(-1).end - rowCompleteOffset;
+      timedStartTs = performance.now() + 15;
+      hasStruckCurrent = true;
+      if (soundMode === 'tone') {
+        illuminateRowComplete(timedStartTs);
+      } else {
+        voice(
+          rows.flatMap((row) =>
+            row.events.map((event) => ({
+              ...event,
+              scheduleSeconds: row.start - rowCompleteOffset,
+            })),
+          ),
+        );
+      }
+      return true;
+    };
+    const startTimedPassage = () => {
+      const [sectionStart, sectionEnd] = timedRange();
+      const tempoScale = tempoBps / scoreTempoBps;
+      const plan = planTimedPassage(sectionStart, sectionEnd, tempoScale);
+      if (!plan) return false;
+      timedRunGeneration += 1;
+      timedLaneOffsets = plan.offsets;
+      timedTempoScale = tempoScale;
+      // Keep authored score-tail beats, but never reset a section drill while a planned excerpt
+      // still has words left to say. Both durations are in wall-clock seconds at this tempo.
+      const gridDuration = (sectionEnd - sectionStart) / SUBDIV / tempoBps;
+      const excerptDuration = plan.passageDuration / tempoScale;
+      timedPassageDuration = Math.max(gridDuration, excerptDuration);
+      timedStartTs = performance.now() + 15;
+      hasStruckCurrent = true;
+      if (soundMode === 'tone') {
+        // The passage source triggers are also the first visible cues. Mark them before sounding so
+        // the first animation frame does not duplicate either opening lane tone.
+        const initialCues = CH.map(
+          (lane) =>
+            timedCues
+              .filter(
+                (cue) =>
+                  cue.ev.lane === lane && cue.ev.tick >= sectionStart && cue.ev.tick < sectionEnd,
+              )
+              .sort((a, b) => a.ev.tick - b.ev.tick)[0],
+        ).filter(Boolean);
+        playTimedTones(initialCues);
+      } else {
+        voice(plan.passageEvents);
+      }
+      return true;
+    };
+    const timedPassageOffset = () =>
+      timedStartTs === null
+        ? 0
+        : Math.max(0, ((performance.now() - timedStartTs) / 1000) * timedTempoScale);
+    const timedRunIsActive = (run) =>
+      !destroyed &&
+      playing &&
+      timedStartTs !== null &&
+      run === timedRunGeneration &&
+      soundMode === 'voice' &&
+      !silent;
+    const resumeTimedVoices = async () => {
+      if (!timedCues || !CLIPS || timedStartTs === null) return false;
+      const run = timedRunGeneration;
+      const resume = ++timedVoiceResumeGeneration;
+      const ready = await loadSamples();
+      // Decoding can outlive a pause, section change, or another monitor choice. Only the same
+      // running passage may recreate sources, and it must still be explicitly in Voices mode.
+      if (!ready || resume !== timedVoiceResumeGeneration || !timedRunIsActive(run)) return false;
+      const [sectionStart, sectionEnd] = timedRange();
+      const plan = planTimedPassage(sectionStart, sectionEnd, timedTempoScale);
+      if (!plan) return false;
+      const offset = timedPassageOffset();
+      const resumedEvents = plan.passageEvents
+        .map((ev) => ({ ...ev, sectionTrimStart: ev.sectionTrimStart + offset }))
+        .filter((ev) => {
+          const sourceStart = (ev.trimStart || 0) + ev.sectionTrimStart;
+          const sourceEnd = ev.timingEnd - Math.max(0, ev.trimEnd || 0);
+          return sourceStart < sourceEnd;
+        });
+      if (!resumedEvents.length) return false;
+      voice(resumedEvents);
+      return true;
+    };
+    const resumeRowCompleteVoices = async () => {
+      if (!rowCompletePlan || !CLIPS || timedStartTs === null) return false;
+      const run = timedRunGeneration;
+      const resume = ++timedVoiceResumeGeneration;
+      const ready = await loadSamples();
+      if (!ready || resume !== timedVoiceResumeGeneration || !timedRunIsActive(run)) return false;
+      const [sectionStart, sectionEnd] = timedRange();
+      const elapsed = Math.max(0, (performance.now() - timedStartTs) / 1000);
+      const remaining = rowCompletePlan.rows
+        .filter((row) => row.tick >= sectionStart && row.tick < sectionEnd)
+        .flatMap((row) => {
+          const start = row.start - rowCompleteOffset;
+          const end = row.end - rowCompleteOffset;
+          if (elapsed >= end) return [];
+          const sectionTrimStart = Math.max(0, elapsed - start);
+          return row.events.map((event) => ({
+            ...event,
+            sectionTrimStart,
+            scheduleSeconds: Math.max(0, start - elapsed),
+          }));
+        });
+      if (!remaining.length) return false;
+      voice(remaining);
+      return true;
     };
 
     const loop = (ts) => {
+      if (rowCompletePlan && timedStartTs !== null) {
+        illuminateRowComplete(ts);
+        if ((ts - timedStartTs) / 1000 >= timedPassageDuration) {
+          stopSamples();
+          clearPerformed();
+          const [s] = timedRange();
+          currentRow = s;
+          renderRow(s);
+          startRowCompletePassage();
+        }
+        rafId = requestAnimationFrame(loop);
+        return;
+      }
+      if (timedCues && timedStartTs !== null) {
+        illuminateTimed(ts);
+        if ((ts - timedStartTs) / 1000 >= timedPassageDuration) {
+          stopSamples();
+          clearPerformed();
+          const [s] = timedRange();
+          currentRow = s;
+          renderRow(s);
+          startTimedPassage();
+        }
+        rafId = requestAnimationFrame(loop);
+        return;
+      }
       const dt = (ts - lastTs) / 1000;
       lastTs = ts;
       acc += dt * rps;
@@ -517,19 +1057,25 @@
       rafId = requestAnimationFrame(loop);
     };
     // Prime the active sound source on a user gesture (autoplay/TTS both require it).
-    const primeAudio = () => {
+    const primeAudio = async () => {
       if (silent) return;
       ensureCtx();
       if (ctx && ctx.state === 'suspended') ctx.resume();
       if (soundMode === 'voice') {
-        if (CLIPS) loadSamples();
+        if (CLIPS) await loadSamples();
         else if (synth) {
           loadVoices();
           synth.resume();
         }
       }
     };
-    const beginPlaying = () => {
+    const beginPlaying = (generation) => {
+      if (!playRequestIsCurrent(generation)) return;
+      if (!hasStruckCurrent) {
+        if (rowCompletePlan) startRowCompletePassage();
+        else if (timedCues) startTimedPassage();
+        else advance(currentRow);
+      }
       playing = true;
       playBtn.classList.add('on');
       playBtn.textContent = '❚❚ Pause';
@@ -567,30 +1113,47 @@
       };
       beat();
     };
-    const play = () => {
-      if (playing || counting) return;
-      primeAudio();
-      const [s, e] = range();
+    const play = async () => {
+      if (playing || counting || starting) return;
+      const generation = ++playGeneration;
+      starting = true;
+      const [s, e] = timedCues || rowCompletePlan ? timedRange() : range();
       if (currentRow < s || currentRow >= e) {
         clearPerformed();
-        advance(s);
+        currentRow = s;
+        hasStruckCurrent = false;
       }
-      if (countin && !silent) {
-        counting = true;
-        runCountIn(3, beginPlaying);
-      } else {
-        beginPlaying();
+      try {
+        await primeAudio();
+        if (!playRequestIsCurrent(generation)) return;
+        if (countin && !silent) {
+          counting = true;
+          runCountIn(3, () => beginPlaying(generation));
+        } else {
+          beginPlaying(generation);
+        }
+      } finally {
+        if (generation === playGeneration) starting = false;
       }
     };
     const pause = () => {
+      cancelPendingPlay();
       playing = false;
       clearCount();
       playBtn.classList.remove('on');
       playBtn.textContent = cue ? 'Cue ▸ (Space)' : '▷ Perform';
       if (synth) synth.cancel();
+      stopSamples();
       if (rafId !== null) {
         cancelAnimationFrame(rafId);
         rafId = null;
+      }
+      if (timedCues || rowCompletePlan) {
+        const [s] = range();
+        clearPerformed();
+        currentRow = s;
+        hasStruckCurrent = false;
+        renderRow(s);
       }
     };
     // Cue mode: the human sets the pace. Each cue strikes the next line; AI voices answer on their
@@ -606,26 +1169,36 @@
     };
     // Rows that actually hold a line, within the selected passage, in order.
     const cueRows = () => {
-      const [s, e] = range();
-      return [...eventsByRow.keys()].filter((r) => r >= s && r <= e).sort((a, b) => a - b);
+      const [s, e] = timedCues || rowCompletePlan ? timedRange() : range();
+      return [...eventsByRow.keys()]
+        .filter((r) => r >= s && (timedCues || rowCompletePlan ? r < e : r <= e))
+        .sort((a, b) => a - b);
     };
     // Each cue strikes the NEXT LINE (not the next empty grid-beat) — the human drives line by line.
-    const cueAdvance = () => {
-      primeAudio();
-      const rows = cueRows();
-      if (!rows.length) return;
-      if (!cued) {
-        cued = true;
-        clearPerformed();
-        advance(rows[0]);
-        return;
-      }
-      const next = rows.find((r) => r > currentRow);
-      if (next === undefined) {
-        clearPerformed();
-        advance(rows[0]); // wrap — loop the passage for drilling
-      } else {
-        advance(next);
+    const cueAdvance = async () => {
+      if (cueAdvancePending) return;
+      cueAdvancePending = true;
+      const generation = playGeneration;
+      try {
+        await primeAudio();
+        if (destroyed || !cue || generation !== playGeneration) return;
+        const rows = cueRows();
+        if (!rows.length) return;
+        if (!cued) {
+          cued = true;
+          clearPerformed();
+          advance(rows[0]);
+          return;
+        }
+        const next = rows.find((r) => r > currentRow);
+        if (next === undefined) {
+          clearPerformed();
+          advance(rows[0]); // wrap — loop the passage for drilling
+        } else {
+          advance(next);
+        }
+      } finally {
+        cueAdvancePending = false;
       }
     };
     // Step BACK to the previous line — rehearsal correction / footswitch back-pedal.
@@ -672,7 +1245,9 @@
       if (!hint) return;
       hint.textContent = cue
         ? 'Live cue — Space / → / pedal strikes the next line, ← steps back. You set the pace; the AI answers.'
-        : 'Loop a section · click a header to mute · ⌥/Alt-click to solo a voice.';
+        : rowCompletePlan
+          ? 'Tracker mode — both lines begin together; the next row waits for the longer read.'
+          : 'Loop a section · click a header to mute · ⌥/Alt-click to solo a voice.';
     };
 
     tempo.value = String(tempoBps);
@@ -681,18 +1256,42 @@
         cueAdvance();
         return;
       }
-      if (playing) pause();
+      if (playing || starting || counting) pause();
       else play();
     };
     const onRestart = () => {
+      cancelPendingPlay();
+      clearCount();
       if (cue) {
         enterCue();
         return;
       }
-      const [s] = range();
+      const [s] = rowCompletePlan ? timedRange() : range();
       acc = 0;
+      stopSamples();
       clearPerformed();
-      advance(s);
+      currentRow = s;
+      hasStruckCurrent = false;
+      renderRow(s);
+      if (playing) {
+        if (rowCompletePlan) startRowCompletePassage();
+        else if (timedCues) startTimedPassage();
+        else advance(s);
+      } else illuminate(s);
+    };
+    const onVoiceConfigChange = () => {
+      const next = voiceConfigSelect?.value;
+      if (!next || next === VOICE_CONFIG) return;
+      pause();
+      sel = 'full';
+      for (const button of sections.children) {
+        button.classList.toggle('on', button.dataset.s === 'full');
+      }
+      clearPerformed();
+      currentRow = 0;
+      hasStruckCurrent = false;
+      renderRow(0);
+      onVoiceConfig(next);
     };
     const onMode = (e) => {
       const b = e.target.closest('button');
@@ -736,6 +1335,7 @@
         muted.add(id);
       }
       refreshLaneStates();
+      refreshActiveSourceAudibility();
     };
     // Footswitch-friendly: BT page-turner pedals emit Space / arrows / PageUp-Down. Forward keys
     // strike the next line; back keys step to the previous one. Only active in cue mode.
@@ -761,16 +1361,43 @@
       if (m === 'off') {
         silent = true;
         if (synth) synth.cancel();
-        if (ctx && ctx.state === 'running') ctx.suspend();
+        // Silent is an audio monitor choice, not a transport command. Keep both the visual clock
+        // and active buffer-source phase running so restoring sound does not rewind the score.
+        refreshMasterAudibility();
+        refreshActiveSourceAudibility();
         return;
       }
+      const previousSoundMode = soundMode;
       silent = false;
       soundMode = m;
+      if (m !== 'voice') {
+        timedVoiceResumeGeneration += 1;
+        stopSamples();
+      }
       ensureCtx();
+      refreshMasterAudibility();
+      refreshActiveSourceAudibility();
       if (ctx && ctx.state === 'suspended') ctx.resume();
       if (m === 'voice') {
-        if (CLIPS) loadSamples();
-        else if (synth) {
+        if (CLIPS) {
+          // Tones intentionally stops the continuous clips while the timed visual clock keeps
+          // advancing. Restore their current source offset rather than restarting the section.
+          if (
+            rowCompletePlan &&
+            playing &&
+            (previousSoundMode === 'tone' || activeSources.size === 0)
+          ) {
+            void resumeRowCompleteVoices();
+          } else if (
+            timedCues &&
+            playing &&
+            (previousSoundMode === 'tone' || activeSources.size === 0)
+          ) {
+            void resumeTimedVoices();
+          } else {
+            void loadSamples();
+          }
+        } else if (synth) {
           loadVoices();
           synth.resume();
         }
@@ -779,16 +1406,39 @@
     const onTempo = () => {
       tempoBps = Number.parseFloat(tempo.value);
       rps = tempoBps * SUBDIV;
+      if (rowCompletePlan) {
+        tempoBps = scoreTempoBps;
+        rps = tempoBps * SUBDIV;
+        tempo.value = String(tempoBps);
+        return;
+      }
+      if (timedCues && playing) {
+        stopSamples();
+        clearPerformed();
+        const [s] = timedRange();
+        currentRow = s;
+        renderRow(s);
+        startTimedPassage();
+      }
     };
     const onSections = (e) => {
       const b = e.target.closest('button');
       if (!b) return;
       sel = b.dataset.s;
+      if (cue) cued = false;
       for (const btn of sections.children) btn.classList.toggle('on', btn === b);
-      const [s] = range();
+      const [s] = rowCompletePlan ? timedRange() : range();
       acc = 0;
+      stopSamples();
       clearPerformed();
-      advance(s);
+      currentRow = s;
+      hasStruckCurrent = false;
+      renderRow(s);
+      if (playing) {
+        if (rowCompletePlan) startRowCompletePassage();
+        else if (timedCues) startTimedPassage();
+        else advance(s);
+      } else illuminate(s);
     };
     const onResize = () => {
       measure();
@@ -797,6 +1447,7 @@
 
     playBtn.addEventListener('click', onPlay);
     restartBtn.addEventListener('click', onRestart);
+    voiceConfigSelect?.addEventListener('change', onVoiceConfigChange);
     soundSeg.addEventListener('click', onSound);
     modeSeg.addEventListener('click', onMode);
     countinBtn.addEventListener('click', onCountin);
@@ -808,12 +1459,19 @@
 
     updateHint();
     measure();
-    advance(0);
+    currentRow = 0;
+    renderRow(0);
+    illuminate(0);
+    hasStruckCurrent = false;
 
     return {
       destroy: () => {
+        destroyed = true;
+        cancelPendingPlay();
+        playing = false;
         if (rafId !== null) cancelAnimationFrame(rafId);
         clearCount();
+        voiceConfigSelect?.removeEventListener('change', onVoiceConfigChange);
         window.removeEventListener('resize', onResize);
         window.removeEventListener('keydown', onKey);
         for (const inp of midiInputs) inp.removeEventListener('midimessage', onMidi);
@@ -821,6 +1479,7 @@
           synth.cancel();
           synth.removeEventListener('voiceschanged', loadVoices);
         }
+        stopSamples();
         if (ctx && ctx.state !== 'closed') ctx.close();
         root.innerHTML = '';
         root.classList.remove('sse');

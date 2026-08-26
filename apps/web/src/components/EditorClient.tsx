@@ -2,9 +2,20 @@
 
 import { ClipWaveform } from '@/components/ClipWaveform';
 import { loadScript, loadStylesheet } from '@/lib/loadScript';
+import {
+  deriveScoreTotal,
+  duplicateContinuousPassageEvent,
+  moveContinuousPassageEvent,
+  removeContinuousPassageEvent,
+  renameContinuousPassageLine,
+} from '@/lib/scoreEditing';
 import { ENGINE_SCRIPT, ENGINE_STYLES, SCORE_SCRIPTS } from '@/lib/scoreScripts';
 import { VOICE_CATALOG } from '@/lib/voiceCatalog';
-import type { Lane, Score } from '@/types/sse';
+import {
+  resolveVoiceConfigurationId,
+  selectVoicePackConfiguration,
+} from '@/lib/voiceConfigurations';
+import type { ClipTiming, Lane, Score, VoicePack } from '@/types/sse';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 // The arrangement editor — "Ableton for voice", clip-view "for words". A horizontal timeline: lanes
@@ -47,6 +58,8 @@ interface EditEvent {
   id: string;
   lane: string;
   text: string;
+  speechText?: string | undefined;
+  silent?: boolean;
   start: number; // beat position (fractional allowed)
   beats: number; // clip length in beats
   warp?: boolean; // stretch audio to fill `beats` (vs. natural recorded length)
@@ -109,12 +122,20 @@ export function EditorClient() {
   const [lanes, setLanes] = useState<Lane[]>(blankLanes);
   const [events, setEvents] = useState<EditEvent[]>([]);
   const [tempo, setTempo] = useState(3);
+  const [total, setTotal] = useState(12);
+  const [playback, setPlayback] = useState<Score['playback']>();
   const [title, setTitle] = useState('Untitled');
   const [scoreId, setScoreId] = useState('untitled');
   const [selected, setSelected] = useState<string | null>(null);
   const [registry, setRegistry] = useState<Record<string, Score>>({});
   const [performing, setPerforming] = useState(false);
+  const [voiceConfigurations, setVoiceConfigurations] = useState<
+    NonNullable<Score['voiceConfigurations']>
+  >({});
+  const [selectedVoiceConfiguration, setSelectedVoiceConfiguration] = useState<string | null>(null);
+  const [voicePack, setVoicePack] = useState<VoicePack | null>(null);
   const [clips, setClips] = useState<Record<string, string> | null>(null); // neural pack for L6 craft
+  const [timings, setTimings] = useState<Record<string, ClipTiming> | null>(null);
   const [clipDur, setClipDur] = useState(0);
   const [pxPerBeat, setPxPerBeat] = useState(28); // timeline zoom
   const [snapIdx, setSnapIdx] = useState(0); // index into SNAPS
@@ -138,6 +159,8 @@ export function EditorClient() {
         id: `e${i}`,
         lane: e.lane,
         text: e.text,
+        ...(e.speechText ? { speechText: e.speechText } : {}),
+        ...(e.silent ? { silent: true } : {}),
         // migrate legacy integer scores: start defaults to row, length to 1 beat
         start: typeof e.start === 'number' ? e.start : e.row,
         beats: typeof e.beats === 'number' && e.beats > 0 ? e.beats : 1,
@@ -152,6 +175,19 @@ export function EditorClient() {
     );
     seq.current = sc.events.length;
     setTempo(sc.tempo ?? 3);
+    setPlayback(sc.playback);
+    setVoiceConfigurations(
+      Object.fromEntries(
+        Object.entries(sc.voiceConfigurations || {}).map(([id, lanes]) => [
+          id,
+          Object.fromEntries(
+            Object.entries(lanes).map(([lane, treatment]) => [lane, { ...treatment }]),
+          ),
+        ]),
+      ),
+    );
+    setSelectedVoiceConfiguration(resolveVoiceConfigurationId(sc, sc.defaultVoiceConfiguration));
+    setTotal(deriveScoreTotal(sc.total, sc.events));
     setTitle(sc.title);
     setScoreId(sc.id);
     setSelected(null);
@@ -162,20 +198,39 @@ export function EditorClient() {
   useEffect(() => {
     let cancelled = false;
     if (!registry[scoreId]) {
+      setVoicePack(null);
       setClips(null);
+      setTimings(null);
       return;
     }
     (async () => {
       await loadScript(`/prototypes/voices/${scoreId}.js`);
       if (cancelled) return;
-      setClips(window.SSE_VOICES?.[scoreId]?.clips ?? null);
+      const voicePack = window.SSE_VOICES?.[scoreId];
+      setVoicePack(voicePack ?? null);
+      if (!voicePack) {
+        setClips(null);
+        setTimings(null);
+        return;
+      }
+      const selected = selectVoicePackConfiguration(
+        registry[scoreId],
+        voicePack,
+        selectedVoiceConfiguration,
+      );
+      setClips(selected.clips);
+      setTimings(selected.timings);
     })().catch(() => {
-      if (!cancelled) setClips(null);
+      if (!cancelled) {
+        setVoicePack(null);
+        setClips(null);
+        setTimings(null);
+      }
     });
     return () => {
       cancelled = true;
     };
-  }, [scoreId, registry]);
+  }, [scoreId, registry, selectedVoiceConfiguration]);
 
   // Load the score registry (for the "start from" picker), and any ?score= starting point.
   useEffect(() => {
@@ -239,9 +294,14 @@ export function EditorClient() {
     const ls = lanesRef.current;
     const idx = Math.min(ls.length - 1, Math.max(0, d.laneIdx + Math.round(dy / LANE_H)));
     const lane = ls[idx]?.id;
-    setEvents((prev) =>
-      prev.map((x) => (x.id === d.id ? { ...x, start: ns, ...(lane ? { lane } : {}) } : x)),
-    );
+    setEvents((prev) => {
+      const current = prev.find((event) => event.id === d.id);
+      const moved: EditEvent[] =
+        lane && current && current.lane !== lane
+          ? moveContinuousPassageEvent(prev, d.id, lane)
+          : prev;
+      return moved.map((event) => (event.id === d.id ? { ...event, start: ns } : event));
+    });
   };
 
   const onClipPointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
@@ -275,18 +335,33 @@ export function EditorClient() {
   const duplicateClip = () => {
     const src = events.find((e) => e.id === selected);
     if (!src) return;
-    const ev: EditEvent = { ...src, id: uid(), start: tidy(src.start + src.beats) };
+    const ev: EditEvent = duplicateContinuousPassageEvent(src, uid(), tidy(src.start + src.beats));
     setEvents((prev) => [...prev, ev]);
     setSelected(ev.id);
   };
   const deleteClip = () => {
     if (!selected) return;
-    setEvents((prev) => prev.filter((e) => e.id !== selected));
+    setEvents((prev) => removeContinuousPassageEvent(prev, selected));
     setSelected(null);
   };
   const patchClip = (patch: Partial<EditEvent>) => {
     if (!selected) return;
-    setEvents((prev) => prev.map((e) => (e.id === selected ? { ...e, ...patch } : e)));
+    setEvents((prev) => {
+      const selectedEvent = prev.find((event) => event.id === selected);
+      if (!selectedEvent) return prev;
+      const targetLane = patch.lane;
+      if (targetLane && targetLane !== selectedEvent.lane) {
+        const moved: EditEvent[] = moveContinuousPassageEvent(prev, selected, targetLane);
+        return moved.map((event) =>
+          event.id === selected ? { ...event, ...patch, lane: targetLane } : event,
+        );
+      }
+      return prev.map((event) => (event.id === selected ? { ...event, ...patch } : event));
+    });
+  };
+  const renameClip = (text: string) => {
+    if (!selected) return;
+    setEvents((prev) => renameContinuousPassageLine(prev, selected, text));
   };
 
   const addLane = () => {
@@ -326,16 +401,23 @@ export function EditorClient() {
   // Emits the timing model plus a rounded `row` so any un-upgraded consumer still positions roughly;
   // `start` is written only when it differs from that row (i.e. the clip is off the integer grid).
   const toScore = useCallback((): Score => {
-    const maxEnd = events.reduce((m, e) => Math.max(m, e.start + e.beats), 0);
     const id = slug(scoreId || title);
     return {
       id,
       short: title,
       title,
+      ...(playback ? { playback } : {}),
+      ...(Object.keys(voiceConfigurations).length
+        ? {
+            voiceConfigurations,
+            defaultVoiceConfiguration:
+              selectedVoiceConfiguration || Object.keys(voiceConfigurations)[0],
+          }
+        : {}),
       tempo,
       lanes,
       sections: {},
-      total: Math.ceil(maxEnd) + 3,
+      total: deriveScoreTotal(total, events),
       events: events
         .slice()
         .sort((a, b) => a.start - b.start)
@@ -345,6 +427,8 @@ export function EditorClient() {
             row,
             lane: e.lane,
             text: e.text,
+            ...(e.speechText ? { speechText: e.speechText } : {}),
+            ...(e.silent ? { silent: true } : {}),
             ...(Math.abs(e.start - row) > 1e-6 ? { start: tidy(e.start) } : {}),
             ...(Math.abs(e.beats - 1) > 1e-6 ? { beats: tidy(e.beats) } : {}),
             ...(e.warp ? { warp: true } : {}),
@@ -357,7 +441,17 @@ export function EditorClient() {
           };
         }),
     };
-  }, [events, lanes, tempo, title, scoreId]);
+  }, [
+    events,
+    lanes,
+    playback,
+    tempo,
+    title,
+    scoreId,
+    total,
+    voiceConfigurations,
+    selectedVoiceConfiguration,
+  ]);
 
   const exportJson = () => {
     const score = toScore();
@@ -394,18 +488,31 @@ export function EditorClient() {
       const score = toScore();
       // Perform with the real neural clips when we have them, so audio craft is audible; else the
       // engine falls back to Web Speech (edited/new lines with no rendered clip do too).
-      handle = engine.mount(el, { score, clips, scores: [score] });
+      handle = engine.mount(el, {
+        score,
+        voicePack,
+        voiceConfig: selectedVoiceConfiguration,
+        clips,
+        timings,
+        scores: [score],
+        onVoiceConfig: (id) => {
+          setPerforming(false);
+          setSelectedVoiceConfiguration(id);
+        },
+      });
     })().catch((err) => console.error(err));
     return () => {
       cancelled = true;
       if (handle) handle.destroy();
     };
-  }, [performing, toScore, clips]);
+  }, [performing, toScore, voicePack, selectedVoiceConfiguration, clips, timings]);
 
   const selectedEv = events.find((e) => e.id === selected) ?? null;
   const selLane = selectedEv ? (lanes.find((l) => l.id === selectedEv.lane) ?? null) : null;
   const selIsAi = !!selLane && selLane.performer !== 'human';
-  const selB64 = selectedEv ? (clips?.[`${selectedEv.lane}|${selectedEv.text}`] ?? null) : null;
+  const selB64 = selectedEv
+    ? (clips?.[`${selectedEv.lane}|${selectedEv.speechText || selectedEv.text}`] ?? null)
+    : null;
   const durMax = clipDur > 0 ? clipDur : 4;
   const fadeMax = Math.min(1.5, durMax / 2);
   const maxEnd = events.reduce((m, e) => Math.max(m, e.start + e.beats), 0);
@@ -548,6 +655,29 @@ export function EditorClient() {
         <button type="button" style={btn} onClick={addLane}>
           + Lane
         </button>
+        {Object.keys(voiceConfigurations).length > 0 && (
+          <label style={{ fontSize: 11, color: C.faint }}>
+            Voice treatment{' '}
+            <select
+              aria-label="Voice treatment"
+              style={field}
+              value={selectedVoiceConfiguration ?? ''}
+              onChange={(event) => {
+                setPerforming(false);
+                setSelectedVoiceConfiguration(event.target.value);
+              }}
+            >
+              {Object.keys(voiceConfigurations).map((id) => (
+                <option key={id} value={id}>
+                  {id
+                    .split('-')
+                    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+                    .join(' ')}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <select
           aria-label="Start from a score"
           style={field}
@@ -774,7 +904,7 @@ export function EditorClient() {
                 aria-label="Clip text"
                 style={{ ...field, flex: 1, minWidth: 180 }}
                 value={selectedEv.text}
-                onChange={(e) => patchClip({ text: e.target.value })}
+                onChange={(e) => renameClip(e.target.value)}
               />
               <select
                 aria-label="Clip lane"

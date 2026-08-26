@@ -7,6 +7,15 @@ out/
 .turbo/
 *.tsbuildinfo
 
+# The host-level Git ignore excludes directories named public/. Prototype score sources and their
+# generated neural voice packs are intentional product assets, so make only these JS files visible.
+!apps/web/public/
+!apps/web/public/prototypes/
+!apps/web/public/prototypes/scores/
+!apps/web/public/prototypes/scores/*.js
+!apps/web/public/prototypes/voices/
+!apps/web/public/prototypes/voices/*.js
+
 .env
 .env.local
 .env.*.local

@@ -77,7 +77,7 @@ export default function HomePage() {
             color: '#8a8a90',
           }}
         >
-          Four scores to play with
+          Five scores to play with
         </h2>
         <ul style={{ lineHeight: 1.9, color: '#bdbdc2', paddingLeft: '1.1rem' }}>
           <li>
@@ -94,6 +94,11 @@ export default function HomePage() {
           </li>
           <li>
             <strong style={{ color: '#e8e8ea' }}>Earnest</strong> — a human + AI duet.
+          </li>
+          <li>
+            <strong style={{ color: '#e8e8ea' }}>Lady Macbeth / Macbeth</strong> — a contemporary
+            character poem by @two.be with artwork by @amaanjahangir, performed as a parallel
+            two-voice score.
           </li>
         </ul>
       </section>

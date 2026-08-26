@@ -12,6 +12,7 @@ export interface Lane {
   rate?: string;
   pan?: number;
   gain?: number;
+  align?: 'left' | 'right';
   tone?: { f: number; type: string };
   speech?: { pitch: number; rate: number; prefer: string[] };
 }
@@ -20,6 +21,10 @@ export interface ScoreEvent {
   row: number;
   lane: string;
   text: string;
+  // The visible score line can trigger a longer continuous spoken passage. `silent` visual lines
+  // remain part of the score and playhead, but do not add a second voice trigger.
+  speechText?: string;
+  silent?: boolean;
   section?: string;
   stage?: boolean;
   // Timing model — Ableton clip-view "for words". A clip has a beat position and a length; the
@@ -43,6 +48,9 @@ export interface Score {
   title: string;
   byline?: string;
   caption?: string;
+  playback?: 'row-complete';
+  voiceConfigurations?: Record<string, Record<string, VoiceTreatment>>;
+  defaultVoiceConfiguration?: string;
   tempo?: number;
   lanes: Lane[];
   sections?: Record<string, [number, number]>;
@@ -50,20 +58,56 @@ export interface Score {
   events: ScoreEvent[];
 }
 
+export interface VoiceTreatment {
+  pitch?: string;
+  transposeSemitones?: number;
+}
+
 export type ClipMap = Record<string, string>;
+
+export interface WordTiming {
+  text: string;
+  offset: number;
+  duration: number;
+  start: number;
+  end: number;
+}
+
+export interface ClipTiming {
+  voice: string;
+  rate: string;
+  pitch?: string;
+  transposeSemitones?: number;
+  text: string;
+  duration: number;
+  words: WordTiming[];
+}
+
+export interface VoicePackConfiguration {
+  count?: number;
+  clips: ClipMap;
+  timings: Record<string, ClipTiming>;
+}
 
 export interface VoicePack {
   source?: string;
   format?: string;
   count?: number;
+  totalCount?: number;
   clips: ClipMap;
+  timings?: Record<string, ClipTiming>;
+  configurations?: Record<string, VoicePackConfiguration>;
 }
 
 export interface MountOptions {
   score: Score;
   clips: ClipMap | null;
+  timings?: Record<string, ClipTiming> | null;
+  voicePack?: VoicePack | null;
+  voiceConfig?: string | null;
   scores: Score[];
   onPick?: (id: string) => void;
+  onVoiceConfig?: (id: string) => void;
 }
 
 export interface TrackerHandle {
